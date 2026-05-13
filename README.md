@@ -7,6 +7,7 @@ A personal-use Chrome extension that augments [thetopo.com](https://thetopo.com)
 - **Exclude features** — filter out routes with crimps, slopers, dynos, etc. (tri-state: ignore / must have / exclude)
 - **Ascent range** — min/max ascent count with editable number inputs (0–200+)
 - **Todo / Done** — filter against your own todo list and completed ascents (auto-fetched when you're logged in)
+- **My Crags dashboard** — a standalone page (button in the filter panel) with: where-to-go-next ranking by open todos, per-crag completion % across all your visited areas, grade firsts (the crag where each grade became real for you), and assorted fun stats
 - **Name search**, sort by rating / ascents / grade / name, dual-thumb grade slider, 3-star min rating
 - **Filters everything client-side** over all 5400+ routes per area — no more clicking "Show more"
 - **Removes the premium upsell** on the page
@@ -30,6 +31,7 @@ Toggle the extension on/off per tab by clicking the BetterCrags icon in your Chr
 - Login required for the **Todo** / **Done** filters (the extension scans the page for your username automatically)
 - The `–` button at the right collapses the filter body; click again to expand
 - The toolbar icon (top of Chrome) toggles BetterCrags on/off for the active tab
+- The **My Crags** button opens a dashboard page in a new tab. It uses cached crag totals from the area routelists you've visited; visit more areas to fill in completion % for those crags. Crag pages it doesn't know yet are fetched on demand and cached for a week.
 
 ## Caveats
 

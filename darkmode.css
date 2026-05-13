@@ -1,0 +1,437 @@
+/* BetterCrags dark mode for thetopo.com.
+   All rules are gated on `html.bettercrags-dark` so this file is harmless
+   when the toggle is off. Selectors target the actual class names the site
+   ships: `.box-white` is the dominant "white card", `.bg-light-gray` is the
+   speckled content background, the header is `.navbar-inverse` (already
+   dark), and Bootstrap forms/buttons use the usual `.btn`/`.form-control`. */
+
+:root {
+  --bc-bg: #14181d;
+  --bc-bg-elev: #1c2128;
+  --bc-bg-elev-2: #232a32;
+  --bc-bg-elev-3: #2c333d;
+  --bc-border: #2c333d;
+  --bc-border-strong: #3a4350;
+  --bc-text: #d8dde3;
+  --bc-text-strong: #f0f3f7;
+  --bc-text-muted: #8b929c;
+  --bc-link: #6db3f2;
+  --bc-link-hover: #8fc7ff;
+  --bc-link-visited: #c69af5;
+  --bc-accent: #2c7dd9;
+}
+
+/* ── Root surfaces ─────────────────────────────────────────────────── */
+html.bettercrags-dark,
+html.bettercrags-dark body {
+  background-color: var(--bc-bg) !important;
+  color: var(--bc-text) !important;
+}
+
+/* The site wraps logged-in content in .feed-items-user.bg-light-gray which
+   carries a noise/dot SVG as background-image. Kill the image; the dark
+   tone underneath stands on its own. */
+html.bettercrags-dark .bg-light-gray,
+html.bettercrags-dark .feed-items-user,
+html.bettercrags-dark .climber-activity.bg-light-gray {
+  background-color: var(--bc-bg) !important;
+  background-image: none !important;
+  color: var(--bc-text);
+}
+
+/* ── Header / footer ───────────────────────────────────────────────── */
+html.bettercrags-dark .navbar.navbar-inverse,
+html.bettercrags-dark .nav-container {
+  background-color: #0f1216 !important;
+  border-color: var(--bc-border);
+}
+html.bettercrags-dark .footer {
+  background-color: #0f1216 !important;
+  color: var(--bc-text-muted);
+  border-top: 1px solid var(--bc-border);
+}
+html.bettercrags-dark .footer a { color: var(--bc-text); }
+html.bettercrags-dark .footer h3 { color: var(--bc-text-strong); }
+html.bettercrags-dark .copyright { color: var(--bc-text-muted); }
+
+/* ── Generic wrappers ──────────────────────────────────────────────── */
+html.bettercrags-dark header,
+html.bettercrags-dark main,
+html.bettercrags-dark section,
+html.bettercrags-dark article,
+html.bettercrags-dark aside,
+html.bettercrags-dark .container,
+html.bettercrags-dark .body-container,
+html.bettercrags-dark .wrapper,
+html.bettercrags-dark .content,
+html.bettercrags-dark .main,
+html.bettercrags-dark .row {
+  background-color: transparent;
+  color: inherit;
+  border-color: var(--bc-border);
+}
+
+/* ── White card surface — the dominant pattern on this site ───────── */
+html.bettercrags-dark .box-white,
+html.bettercrags-dark .box-padded,
+html.bettercrags-dark .feed-item,
+html.bettercrags-dark .login-container,
+html.bettercrags-dark .login-form,
+html.bettercrags-dark .banner-search-container,
+html.bettercrags-dark .banner-search-box,
+html.bettercrags-dark .banner-search-header,
+html.bettercrags-dark .banner-premium-search-container,
+html.bettercrags-dark .auth-services-container,
+html.bettercrags-dark .crags-list-box,
+html.bettercrags-dark .new-app-banner,
+html.bettercrags-dark .updates-container {
+  background-color: var(--bc-bg-elev) !important;
+  color: var(--bc-text);
+  border-color: var(--bc-border) !important;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
+}
+
+/* Nested boxes inside a box-white shouldn't double-up — keep them flat. */
+html.bettercrags-dark .box-white .box-white,
+html.bettercrags-dark .box-white .box-padded {
+  background-color: transparent !important;
+  box-shadow: none;
+}
+
+/* Hover lift on feed cards */
+html.bettercrags-dark .feed-item:hover {
+  background-color: var(--bc-bg-elev-2) !important;
+}
+
+/* ── Feed page (React-rendered) ────────────────────────────────────── */
+/* The actual white card surface lives on `.feed-item .item-wrapper` and
+   on `.user-share-box` — those plus the notification-feed `.timeline-item
+   .flag` are the only post-styling left after .box-white is handled. */
+html.bettercrags-dark .feed-item .item-wrapper,
+html.bettercrags-dark .feed-items-user .user-share-box,
+html.bettercrags-dark .timeline-item .flag {
+  background-color: var(--bc-bg-elev) !important;
+  border-color: var(--bc-border) !important;
+  color: var(--bc-text);
+}
+html.bettercrags-dark .notification-feed-items li.item a.feed-item:hover .item-wrapper {
+  background-color: var(--bc-bg-elev-2) !important;
+}
+/* Ascent / Photo / Beta tab strip sits on `.share-actions-container` —
+   the base CSS gives it a paler shade than the parent share box; keep
+   that two-tone relationship in dark mode. */
+html.bettercrags-dark .feed-items-user .user-share-box .share-actions-container {
+  background-color: var(--bc-bg-elev-2) !important;
+}
+html.bettercrags-dark .feed-items-user .user-share-box .share-actions-container a {
+  border-top-color: var(--bc-border) !important;
+  color: var(--bc-text);
+}
+html.bettercrags-dark .feed-items-user .user-share-box .share-actions-container a + a {
+  border-left-color: var(--bc-border) !important;
+}
+html.bettercrags-dark .feed-items-user .user-share-box .share-actions-container a:hover {
+  background-color: var(--bc-bg-elev-3) !important;
+}
+/* Comments strip at the bottom of a feed item */
+html.bettercrags-dark .feed-item .comments .chat {
+  background-color: var(--bc-bg-elev-2) !important;
+  border-top-color: var(--bc-border) !important;
+}
+/* Item content typography — base sets climber-name/title/description to
+   #333 and date to #777, which is invisible on dark. */
+html.bettercrags-dark .item-content .item-details .climber-name,
+html.bettercrags-dark .item-content .item-details .title,
+html.bettercrags-dark .item-content .item-details .title a,
+html.bettercrags-dark .item-content .item-details .description,
+html.bettercrags-dark .item-content .item-details .description a,
+html.bettercrags-dark .timeline-item .content .message .climber-name,
+html.bettercrags-dark .timeline-item .content .message .description {
+  color: var(--bc-text-strong) !important;
+}
+html.bettercrags-dark .item-content .item-details .date,
+html.bettercrags-dark .item-content .item-details .date *,
+html.bettercrags-dark .timeline-item .content .message .date,
+html.bettercrags-dark .timeline-item .content .message .date * {
+  color: var(--bc-text-muted) !important;
+}
+
+/* ── Banners / hero images ─────────────────────────────────────────── */
+/* The profile mountain banner & login hero use background images that
+   look bleached in dark mode — dim them so they merge with the page. */
+html.bettercrags-dark .banner.user-profile,
+html.bettercrags-dark .banner-placeholder,
+html.bettercrags-dark .banner-container {
+  background-color: #0f1216;
+}
+/* Apply the brightness only to the photo layer, not the container —
+   filter on the parent visually dims everything inside, including the
+   search form text and slider, which we want to stay readable. */
+html.bettercrags-dark .banner-container > .photo,
+html.bettercrags-dark .banner.user-profile .background-image {
+  filter: brightness(0.55);
+}
+/* Inline background-image on the small profile-card header */
+html.bettercrags-dark .background-image {
+  filter: brightness(0.55) saturate(0.8);
+}
+
+/* ── Typography ────────────────────────────────────────────────────── */
+html.bettercrags-dark h1,
+html.bettercrags-dark h2,
+html.bettercrags-dark h3,
+html.bettercrags-dark h4,
+html.bettercrags-dark h5,
+html.bettercrags-dark h6,
+html.bettercrags-dark .headline,
+html.bettercrags-dark .miniheader,
+html.bettercrags-dark .lead {
+  color: var(--bc-text-strong) !important;
+}
+html.bettercrags-dark .description,
+html.bettercrags-dark .climber-description,
+html.bettercrags-dark .item-description,
+html.bettercrags-dark .ago,
+html.bettercrags-dark .date,
+html.bettercrags-dark small {
+  color: var(--bc-text-muted) !important;
+}
+
+/* ── Links ─────────────────────────────────────────────────────────── */
+html.bettercrags-dark a {
+  color: var(--bc-link);
+}
+html.bettercrags-dark a:hover { color: var(--bc-link-hover); }
+html.bettercrags-dark a:visited { color: var(--bc-link-visited); }
+/* Keep climber/crag/area name links in regular text colour, not link blue */
+html.bettercrags-dark a.climber-name,
+html.bettercrags-dark a.crag-name,
+html.bettercrags-dark a.item-name,
+html.bettercrags-dark a.area {
+  color: var(--bc-text-strong);
+}
+html.bettercrags-dark a.climber-name:visited,
+html.bettercrags-dark a.crag-name:visited,
+html.bettercrags-dark a.item-name:visited {
+  color: var(--bc-link-visited);
+}
+
+/* ── Forms & buttons ───────────────────────────────────────────────── */
+html.bettercrags-dark .form-control,
+html.bettercrags-dark input[type="text"],
+html.bettercrags-dark input[type="email"],
+html.bettercrags-dark input[type="password"],
+html.bettercrags-dark input[type="search"],
+html.bettercrags-dark input[type="number"],
+html.bettercrags-dark textarea,
+html.bettercrags-dark select {
+  background-color: var(--bc-bg-elev-2) !important;
+  color: var(--bc-text) !important;
+  border-color: var(--bc-border-strong) !important;
+}
+html.bettercrags-dark .form-control::placeholder,
+html.bettercrags-dark textarea::placeholder { color: var(--bc-text-muted); }
+html.bettercrags-dark .form-control:focus {
+  border-color: var(--bc-accent) !important;
+  box-shadow: 0 0 0 2px rgba(44, 125, 217, 0.25);
+}
+
+html.bettercrags-dark .btn,
+html.bettercrags-dark .btn-default {
+  background-color: var(--bc-bg-elev-3);
+  color: var(--bc-text);
+  border-color: var(--bc-border-strong);
+}
+html.bettercrags-dark .btn:hover,
+html.bettercrags-dark .btn-default:hover {
+  background-color: var(--bc-bg-elev-2);
+  color: var(--bc-text-strong);
+}
+html.bettercrags-dark .btn-primary {
+  background-color: var(--bc-accent) !important;
+  border-color: #2469bd !important;
+  color: #fff !important;
+}
+html.bettercrags-dark .btn-link {
+  background: transparent;
+  color: var(--bc-link);
+  border-color: transparent;
+}
+/* Follow button — base sets `color: #222 !important` (and `#8b8b8b
+   !important` on .btn-following), so dark-mode overrides must also be
+   !important to win the cascade. */
+html.bettercrags-dark .btn-follow {
+  background-color: var(--bc-bg-elev-2) !important;
+  color: var(--bc-text) !important;
+  border-color: var(--bc-border-strong) !important;
+}
+html.bettercrags-dark .btn-follow:hover {
+  background-color: var(--bc-bg-elev-3) !important;
+  color: var(--bc-text-strong) !important;
+  border-color: var(--bc-border-strong) !important;
+}
+html.bettercrags-dark .btn-follow.btn-following {
+  background-color: var(--bc-bg-elev-3) !important;
+  color: var(--bc-text-muted) !important;
+}
+/* The loading overlay paints `hsla(0,0%,100%,.7)` — kill it on dark so
+   the spinner doesn't flash a near-white square over the button. */
+html.bettercrags-dark .btn-follow span.img-loading {
+  background-color: rgba(20, 24, 29, 0.7) !important;
+}
+
+/* ── Tables (route lists are the main case) ────────────────────────── */
+html.bettercrags-dark table { color: var(--bc-text); }
+html.bettercrags-dark th,
+html.bettercrags-dark td { border-color: var(--bc-border) !important; }
+html.bettercrags-dark th { background-color: var(--bc-bg-elev); }
+/* Use a translucent tint for zebra striping so hover/selected states
+   layer cleanly without the rows looking like two different surfaces. */
+html.bettercrags-dark tbody tr:nth-child(even) {
+  background-color: rgba(255, 255, 255, 0.025);
+}
+html.bettercrags-dark tbody tr:hover { background-color: rgba(255, 255, 255, 0.06); }
+
+/* ── Route list page (the "premium topo" routelist) ───────────────── */
+/* Base CSS hardcodes very dark text on what is now a dark page:
+   `table.route-list td>a{color:#333}` for route + crag name links,
+   `table.list a{color:#333}`, `.route-block .route-details{color:#929292}`,
+   `.tags{color:hsl(0,0%,33.5%)}` (~#555), `.lander-page p.description{color:#212121}`,
+   `.headline{color:#666}`. These selectors outweigh our generic `a`/`p`
+   rules, so the overrides below match or exceed their specificity. */
+html.bettercrags-dark table.route-list td > a,
+html.bettercrags-dark table.route-list td a,
+html.bettercrags-dark table.list td > a,
+html.bettercrags-dark table.list a {
+  color: var(--bc-text-strong);
+}
+html.bettercrags-dark table.route-list td > a:visited,
+html.bettercrags-dark table.route-list td a:visited,
+html.bettercrags-dark table.list td > a:visited,
+html.bettercrags-dark table.list a:visited {
+  color: var(--bc-link-visited);
+}
+html.bettercrags-dark table.route-list td > a:hover,
+html.bettercrags-dark table.route-list td a:hover,
+html.bettercrags-dark table.list td > a:hover,
+html.bettercrags-dark table.list a:hover {
+  color: var(--bc-link-hover);
+  text-decoration: none;
+}
+/* Route block subtitle ("Boulder at Crag Name" on mobile, hidden on desktop)
+   and the icon-pill tag row are hardcoded mid-grey by the site. */
+html.bettercrags-dark .route-block .route-details,
+html.bettercrags-dark .route-block__description,
+html.bettercrags-dark .route-details {
+  color: var(--bc-text-muted);
+}
+html.bettercrags-dark .tags { color: var(--bc-text-muted); }
+/* The little yellow circular feature pills (.tag) keep their bg; the
+   inner glyph icons are forced to #222 by base CSS — that's still
+   readable against the yellow disc, so leave them. */
+
+/* Stars: empty stars are #ccc which is too bright on dark and competes
+   with the gold full stars. Drop them to a muted tone. */
+html.bettercrags-dark .star.empty { color: var(--bc-border-strong); }
+
+/* Tick icon next to "done" routes (base sets #444). */
+html.bettercrags-dark table.list .tick,
+html.bettercrags-dark table.list a .tick,
+html.bettercrags-dark table.route-list .icon { color: var(--bc-text-muted); }
+
+/* Landing-page heading/subtitle. Bump the title to pure white so it
+   reads as the page's primary focus, and soften the yellow brand
+   underline so it sits with the dark palette instead of vibrating. */
+html.bettercrags-dark .lander-page h2 { color: #fff !important; }
+html.bettercrags-dark .lander-page h2::after {
+  border-bottom-color: rgba(243, 221, 0, 0.45);
+}
+html.bettercrags-dark .lander-page p.description { color: var(--bc-text); }
+html.bettercrags-dark .headline { color: var(--bc-text-muted); }
+html.bettercrags-dark .headline strong { color: var(--bc-text-strong); }
+
+/* Yellow "Premium" corner ribbon — keep its black-on-yellow contrast. */
+html.bettercrags-dark .tag-premium-topo { color: #000; }
+
+/* ── Misc components ───────────────────────────────────────────────── */
+html.bettercrags-dark hr { border-color: var(--bc-border); }
+html.bettercrags-dark .number-liftup .name { color: var(--bc-text-muted); }
+html.bettercrags-dark .number-liftup .number { color: var(--bc-text-strong); }
+html.bettercrags-dark .badge { background-color: var(--bc-bg-elev-3); color: var(--bc-text); }
+html.bettercrags-dark .ribbon { color: #1a1a1a; } /* yellow pic-of-the-week ribbon keeps its bg */
+
+html.bettercrags-dark .tab-bar,
+html.bettercrags-dark .tab-bar__container,
+html.bettercrags-dark .scroll-nav,
+html.bettercrags-dark .scroll-nav-container {
+  background-color: var(--bc-bg-elev) !important;
+  border-color: var(--bc-border) !important;
+  color: var(--bc-text);
+}
+html.bettercrags-dark .tab-bar__item { color: var(--bc-text-muted); }
+html.bettercrags-dark .tab-bar__item--active,
+html.bettercrags-dark .scroll-nav__nav-item.active { color: var(--bc-text-strong); }
+
+html.bettercrags-dark .items-list__container { border-color: var(--bc-border); }
+html.bettercrags-dark .items-list__item--details .item-description { color: var(--bc-text-muted); }
+
+html.bettercrags-dark .notice-container { color: var(--bc-text); }
+
+/* Inline white background overrides — common on legacy markup */
+html.bettercrags-dark [style*="background-color:#fff"],
+html.bettercrags-dark [style*="background-color: #fff"],
+html.bettercrags-dark [style*="background-color:#ffffff"],
+html.bettercrags-dark [style*="background-color: #ffffff"],
+html.bettercrags-dark [style*="background-color: white"],
+html.bettercrags-dark [style*="background:#fff"],
+html.bettercrags-dark [style*="background: #fff"],
+html.bettercrags-dark [style*="background: white"] {
+  background-color: var(--bc-bg-elev) !important;
+  color: var(--bc-text) !important;
+}
+
+/* Don't invert images, video, canvas, or icons */
+html.bettercrags-dark img,
+html.bettercrags-dark video,
+html.bettercrags-dark canvas,
+html.bettercrags-dark svg {
+  filter: none;
+}
+
+/* ── BetterCrags filter panel — keep readable on dark ──────────────── */
+html.bettercrags-dark .tt-xf-panel {
+  background: var(--bc-bg-elev) !important;
+  color: var(--bc-text);
+  border-color: var(--bc-border-strong);
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.5);
+}
+html.bettercrags-dark .tt-xf-title { color: var(--bc-text-strong); }
+html.bettercrags-dark .tt-xf-count,
+html.bettercrags-dark .tt-xf-meta-progress { color: var(--bc-text-muted); }
+html.bettercrags-dark .tt-xf-row + .tt-xf-row { border-top-color: var(--bc-border) !important; }
+html.bettercrags-dark .tt-xf-power {
+  background: var(--bc-bg-elev-2);
+  border-color: var(--bc-border-strong);
+  color: var(--bc-text);
+}
+html.bettercrags-dark .tt-xf-power[data-on="1"] {
+  background: var(--bc-accent);
+  border-color: #2469bd;
+  color: #fff;
+}
+
+/* ── Front-page grade-range slider (custom .slider-* component) ────── */
+/* Light rail and white thumbs are unreadable on dark; the blue filled
+   .slider-track keeps its accent colour. The grip lines inside each
+   thumb are drawn with ::after on .slider-fragment-bar (#9a9a9a on
+   white) — keep them dark so they stay visible on the new thumb fill. */
+html.bettercrags-dark .inner-slider-rail {
+  background-color: var(--bc-border-strong) !important;
+}
+html.bettercrags-dark .slider-fragment {
+  background-color: var(--bc-bg-elev-3) !important;
+  border-color: var(--bc-border-strong) !important;
+}
+html.bettercrags-dark .slider-fragment-label {
+  color: var(--bc-text);
+}

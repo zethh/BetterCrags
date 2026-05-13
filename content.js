@@ -123,6 +123,42 @@
 
   const META_CACHE_KEY = 'bc_meta_cache_v1';
   const META_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+  const CRAG_TOTALS_KEY = 'bc_crag_totals_v1';
+
+  // Build per-crag totals (counts + grade histogram) from a route array, so
+  // visiting an area routelist incrementally fills the My Crags cache for
+  // every crag that area contains — no extra fetches needed.
+  function harvestCragTotals(routes) {
+    const byCrag = new Map();
+    for (const r of routes) {
+      const id = r.crag_param_id;
+      if (!id) continue;
+      let entry = byCrag.get(id);
+      if (!entry) {
+        entry = { name: r.crag_name || '', byGenre: {}, byGrade: {}, total: 0 };
+        byCrag.set(id, entry);
+      }
+      entry.total += 1;
+      const genre = r.genre || 'Other';
+      entry.byGenre[genre] = (entry.byGenre[genre] || 0) + 1;
+      const gi = r.grade_int || 0;
+      if (gi) entry.byGrade[gi] = (entry.byGrade[gi] || 0) + 1;
+    }
+    return byCrag;
+  }
+  function persistCragTotals(byCrag) {
+    if (!byCrag || !byCrag.size) return;
+    try {
+      chrome.storage.local.get(CRAG_TOTALS_KEY, (o) => {
+        const existing = (o && o[CRAG_TOTALS_KEY]) || {};
+        const now = Date.now();
+        for (const [id, data] of byCrag) {
+          existing[id] = { ...data, t: now };
+        }
+        chrome.storage.local.set({ [CRAG_TOTALS_KEY]: existing });
+      });
+    } catch {}
+  }
   function loadMetaCacheRaw() {
     return new Promise((resolve) => {
       try {
@@ -213,12 +249,17 @@
     }
   }
 
+  const USERNAME_KEY = 'bc_username_v1';
   function detectUsername() {
     for (const a of document.querySelectorAll('a[href^="/climbers/"]')) {
       const m = (a.getAttribute('href') || '').match(/^\/climbers\/([^/?#]+)(?:[/?#]|$)/);
       if (m && m[1] && !['top', 'index', 'search'].includes(m[1])) return m[1];
     }
     return null;
+  }
+  function persistUsername(user) {
+    if (!user) return;
+    try { chrome.storage.local.set({ [USERNAME_KEY]: user }); } catch {}
   }
 
   function extractRouteKeysInto(doc, set) {
@@ -541,6 +582,7 @@
         <input type="search" placeholder="Names (comma-separated)…" data-tt-xf-search>
         <input type="text" placeholder="Crags (comma-separated)…" data-tt-xf-crag>
         <label class="tt-xf-check"><input type="checkbox" checked data-tt-xf-hide-native> Hide site filters</label>
+        <button type="button" data-tt-xf-mycrags class="tt-xf-reset" title="Open the My Crags dashboard">My Crags</button>
         <button type="button" data-tt-xf-reset class="tt-xf-reset">Reset</button>
         <button type="button" class="tt-xf-toggle" data-tt-xf-toggle aria-label="Collapse filters" title="Collapse / expand filters">Hide</button>
       </div>
@@ -733,6 +775,7 @@
     const gradeTable = pickGradeTable(routes);
     const panel = createPanel(routes, gradeTable);
     attachPanel(panel);
+    persistCragTotals(harvestCragTotals(routes));
 
     // If the URL has narrowing filters, fetch a wider dataset in the background.
     const urlParams = new URL(location.href).searchParams;
@@ -747,6 +790,7 @@
         log(`expanded to ${wider.routes.length} routes (was ${initialCount}) via background fetch`);
         routes = wider.routes;
         ROW_HTML_CACHE.clear();
+        persistCragTotals(harvestCragTotals(routes));
         // re-warm cache so the next filter change is instant
         if (typeof warmRowCache === 'function') warmRowCache();
         // force re-render with new data
@@ -994,6 +1038,10 @@
       }
     });
     panel.querySelector('[data-tt-xf-hide-native]').addEventListener('change', scheduleApply);
+
+    panel.querySelector('[data-tt-xf-mycrags]')?.addEventListener('click', () => {
+      try { chrome.runtime.sendMessage({ type: 'BC_OPEN_MYCRAGS' }); } catch (_) {}
+    });
 
     panel.querySelector('[data-tt-xf-reset]').addEventListener('click', () => {
       panel.querySelector('[data-tt-xf-search]').value = '';
@@ -1315,6 +1363,7 @@
         if (statusEl) statusEl.textContent = '(log in to use)';
         return;
       }
+      persistUsername(user);
       if (statusEl) statusEl.textContent = `loading ${user}'s lists…`;
 
       function updateStatus() {

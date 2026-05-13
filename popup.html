@@ -1,0 +1,25 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <div class="bc-popup">
+      <div class="bc-header">BetterCrags</div>
+      <label class="bc-row" for="bc-filters">
+        <span class="bc-label">Filters (this tab)</span>
+        <input type="checkbox" id="bc-filters" />
+        <span class="bc-switch" aria-hidden="true"></span>
+      </label>
+      <label class="bc-row" for="bc-dark">
+        <span class="bc-label">Dark mode (thetopo.com)</span>
+        <input type="checkbox" id="bc-dark" />
+        <span class="bc-switch" aria-hidden="true"></span>
+      </label>
+      <button type="button" id="bc-open-mycrags" class="bc-action">Open My Crags →</button>
+      <div class="bc-note" id="bc-note"></div>
+    </div>
+    <script src="popup.js"></script>
+  </body>
+</html>

@@ -1,8 +1,8 @@
 // BetterCrags background service worker.
 //
-// Toolbar icon click → tell the active tab's content script to toggle.
-// The content script also pings us on init/toggle so we can keep the
-// per-tab badge in sync ("OFF" when disabled, blank when enabled).
+// Two jobs:
+//   1. Keep the per-tab badge in sync with the filter on/off state.
+//   2. Open the standalone My Crags dashboard when the content script asks.
 
 function setBadge(tabId, enabled) {
   if (tabId == null) return;
@@ -14,23 +14,19 @@ function setBadge(tabId, enabled) {
   } catch (_) {}
 }
 
-chrome.action.onClicked.addListener(async (tab) => {
-  if (!tab || !tab.id) return;
-  console.log('[BetterCrags bg] toolbar click on tab', tab.id, tab.url);
-  try {
-    const resp = await chrome.tabs.sendMessage(tab.id, { type: 'BC_TOGGLE' });
-    console.log('[BetterCrags bg] toggle response:', resp);
-    if (resp && typeof resp.enabled === 'boolean') {
-      setBadge(tab.id, resp.enabled);
-    }
-  } catch (err) {
-    console.warn('[BetterCrags bg] toggle failed (content script not loaded on this tab?):', err && err.message);
-    setBadge(tab.id, true); // clear badge if anything weird
-  }
-});
-
-chrome.runtime.onMessage.addListener((msg, sender) => {
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg && msg.type === 'BC_STATE' && sender && sender.tab && sender.tab.id != null) {
     setBadge(sender.tab.id, !!msg.enabled);
+    return false;
   }
+  if (msg && msg.type === 'BC_OPEN_MYCRAGS') {
+    try {
+      chrome.tabs.create({ url: chrome.runtime.getURL('mycrags.html') });
+      sendResponse({ ok: true });
+    } catch (e) {
+      sendResponse({ ok: false, error: String(e) });
+    }
+    return true;
+  }
+  return false;
 });

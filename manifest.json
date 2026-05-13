@@ -1,9 +1,10 @@
 {
   "manifest_version": 3,
   "name": "BetterCrags",
-  "version": "0.18.0",
-  "description": "Adds exclude-feature filters, a minimum-ascents filter, and hides premium upsell promos on thetopo.com route lists.",
-  "permissions": ["storage"],
+  "version": "0.22.0",
+  "description": "Adds exclude-feature filters, a minimum-ascents filter, a My Crags dashboard (todo/done/completion% per crag), hides premium upsell promos, and adds a site-wide dark mode for thetopo.com.",
+  "permissions": ["storage", "activeTab"],
+  "host_permissions": ["https://thetopo.com/*"],
   "icons": {
     "16": "icons/icon-16.png",
     "32": "icons/icon-32.png",
@@ -11,7 +12,8 @@
     "128": "icons/icon-128.png"
   },
   "action": {
-    "default_title": "Toggle BetterCrags on this tab",
+    "default_title": "BetterCrags",
+    "default_popup": "popup.html",
     "default_icon": {
       "16": "icons/icon-16.png",
       "32": "icons/icon-32.png",
@@ -29,6 +31,27 @@
       "js": ["content.js"],
       "css": ["panel.css"],
       "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "https://thetopo.com/*"
+      ],
+      "js": ["darkmode.js"],
+      "css": ["darkmode.css"],
+      "run_at": "document_start"
+    },
+    {
+      "matches": [
+        "https://thetopo.com/*"
+      ],
+      "js": ["nav.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["mycrags.html", "mycrags.css", "mycrags.js"],
+      "matches": ["https://thetopo.com/*"]
     }
   ]
 }

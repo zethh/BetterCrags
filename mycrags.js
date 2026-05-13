@@ -1,0 +1,1247 @@
+// BetterCrags — My Crags dashboard.
+// Reads username + cached crag totals, fetches user's ascents and todo,
+// aggregates per crag and renders a dashboard.
+(() => {
+  'use strict';
+
+  const USERNAME_KEY = 'bc_username_v1';
+  const CRAG_TOTALS_KEY = 'bc_crag_totals_v1';
+  const ASCENTS_CACHE_KEY = 'bc_mycrags_ascents_v1';
+  const CRAG_FETCH_CACHE_KEY = 'bc_mycrags_crag_fetched_v1';
+  const CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 1 day for ascents (cheap to refetch)
+  const CRAG_PAGE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+
+  // Grade tables mirror content.js. Font is upper-case letters, French lower-case.
+  const FONT_GRADES = [
+    [100, '3'], [200, '4'], [300, '5'], [350, '5+'],
+    [400, '6A'], [450, '6A+'], [500, '6B'], [550, '6B+'],
+    [600, '6C'], [650, '6C+'],
+    [700, '7A'], [750, '7A+'], [800, '7B'], [850, '7B+'],
+    [900, '7C'], [950, '7C+'],
+    [1000, '8A'], [1050, '8A+'], [1100, '8B'], [1150, '8B+'],
+    [1200, '8C'], [1250, '8C+'],
+    [1300, '9A'], [1350, '9A+'], [1400, '9B'], [1450, '9B+'],
+    [1500, '9C'],
+  ];
+  const FRENCH_GRADES = [
+    [100, '3'], [200, '4a'], [300, '4c'], [350, '5a'],
+    [400, '5c'], [450, '6a'], [500, '6a+'], [550, '6b'],
+    [600, '6b+'], [650, '6c'],
+    [700, '6c+'], [750, '7a'], [800, '7a+'], [850, '7b'],
+    [900, '7b+'], [950, '7c'],
+    [1000, '7c+'], [1050, '8a'], [1100, '8a+'], [1150, '8b'],
+    [1200, '8b+'], [1250, '8c'],
+    [1300, '8c+'], [1350, '9a'], [1400, '9a+'], [1450, '9b'],
+    [1500, '9c'],
+  ];
+  const FONT_LABEL_TO_INT = new Map(FONT_GRADES.map(([v, l]) => [l, v]));
+  const FRENCH_LABEL_TO_INT = new Map(FRENCH_GRADES.map(([v, l]) => [l, v]));
+  const FONT_INT_TO_LABEL = new Map(FONT_GRADES.map(([v, l]) => [v, l]));
+  const FRENCH_INT_TO_LABEL = new Map(FRENCH_GRADES.map(([v, l]) => [v, l]));
+
+  function intToLabel(gi, genre) {
+    const map = genre === 'Boulder' ? FONT_INT_TO_LABEL : FRENCH_INT_TO_LABEL;
+    return map.get(gi) || String(gi);
+  }
+
+  // Try Font first (uppercase indicates boulder); fall back to French.
+  // Returns { gi, genre, label } or null.
+  function parseGradeToken(token) {
+    if (!token) return null;
+    const t = token.trim().replace(/\s+/g, '');
+    // 7A, 7A+, 8B/8B+, 5, 5+ → Font (boulder)
+    const fontMatch = t.match(/^([3-9])([A-D])?(\+)?$/);
+    if (fontMatch && fontMatch[2]) {
+      const label = (fontMatch[1] + fontMatch[2] + (fontMatch[3] || '')).toUpperCase();
+      const gi = FONT_LABEL_TO_INT.get(label);
+      if (gi) return { gi, genre: 'Boulder', label };
+    }
+    const frenchMatch = t.match(/^([3-9])([a-c])(\+)?$/);
+    if (frenchMatch) {
+      const label = (frenchMatch[1] + frenchMatch[2] + (frenchMatch[3] || '')).toLowerCase();
+      const gi = FRENCH_LABEL_TO_INT.get(label);
+      if (gi) return { gi, genre: 'Sport', label };
+    }
+    // Bare-number grades like "5" or "4+" — assume Font but mark genre unknown.
+    const numMatch = t.match(/^([3-5])(\+)?$/);
+    if (numMatch) {
+      const label = numMatch[1] + (numMatch[2] || '');
+      const gi = FONT_LABEL_TO_INT.get(label) || FRENCH_LABEL_TO_INT.get(label);
+      if (gi) return { gi, genre: '', label };
+    }
+    return null;
+  }
+
+  // Grade tokens within longer text — extract the first reasonable token.
+  const GRADE_TOKEN_RE = /\b\d[A-Da-c]\+?\b|\b\d\+?\b/g;
+  function findGradeInText(text) {
+    if (!text) return null;
+    const candidates = text.match(GRADE_TOKEN_RE) || [];
+    for (const c of candidates) {
+      const parsed = parseGradeToken(c);
+      if (parsed) return parsed;
+    }
+    return null;
+  }
+
+  function findDateInRow(row) {
+    const timeEl = row.querySelector('time[datetime]');
+    if (timeEl) {
+      const d = timeEl.getAttribute('datetime');
+      if (d) return d.slice(0, 10);
+    }
+    if (timeEl && timeEl.textContent) {
+      const parsed = Date.parse(timeEl.textContent);
+      if (!isNaN(parsed)) return new Date(parsed).toISOString().slice(0, 10);
+    }
+    const text = row.textContent || '';
+    const iso = text.match(/\b(20\d{2})-(\d{2})-(\d{2})\b/);
+    if (iso) return `${iso[1]}-${iso[2]}-${iso[3]}`;
+    const slash = text.match(/\b(\d{1,2})\/(\d{1,2})\/(20\d{2})\b/);
+    if (slash) {
+      const mm = String(slash[1]).padStart(2, '0');
+      const dd = String(slash[2]).padStart(2, '0');
+      return `${slash[3]}-${mm}-${dd}`;
+    }
+    return null;
+  }
+
+  // ── Storage helpers ───────────────────────────────────────────────
+  function get(key) {
+    return new Promise((resolve) => {
+      try { chrome.storage.local.get(key, (o) => resolve((o && o[key]) || null)); }
+      catch { resolve(null); }
+    });
+  }
+  function set(key, val) {
+    return new Promise((resolve) => {
+      try { chrome.storage.local.set({ [key]: val }, () => resolve()); }
+      catch { resolve(); }
+    });
+  }
+  function remove(keys) {
+    return new Promise((resolve) => {
+      try { chrome.storage.local.remove(keys, () => resolve()); }
+      catch { resolve(); }
+    });
+  }
+
+  // ── Fetching ──────────────────────────────────────────────────────
+  // The page itself is served from chrome-extension:// — anything path-relative
+  // needs to be rewritten to thetopo.com or it'll 404 against the extension origin.
+  const ORIGIN = 'https://thetopo.com';
+  function absoluteUrl(url) {
+    if (/^https?:\/\//.test(url)) return url;
+    return ORIGIN + (url.startsWith('/') ? url : `/${url}`);
+  }
+  async function fetchHtml(url) {
+    const abs = absoluteUrl(url);
+    const res = await fetch(abs, { credentials: 'include', headers: { 'Accept': 'text/html' } });
+    if (!res.ok) throw new Error(`HTTP ${res.status} for ${abs}`);
+    const text = await res.text();
+    return new DOMParser().parseFromString(text, 'text/html');
+  }
+
+  function maxPageInPager(doc) {
+    const pager = doc.querySelector('#table-pager, .pagination, nav[aria-label="Pager"]');
+    if (!pager) return 0;
+    let mx = 0;
+    for (const a of pager.querySelectorAll('a[data-page], a[href]')) {
+      const dp = a.getAttribute('data-page');
+      if (dp != null) {
+        const p = +dp;
+        if (!isNaN(p)) mx = Math.max(mx, p);
+        continue;
+      }
+      const href = a.getAttribute('href') || '';
+      const m = href.match(/[?&]page=(\d+)/);
+      if (m) mx = Math.max(mx, +m[1]);
+    }
+    return mx;
+  }
+
+  // Parse an ascents-page document (or one page of it) into [{key, cragId, cragName, routeName, gradeInt, gradeLabel, genre, date}].
+  // We keep every row (don't dedupe) so callers can pick the earliest date
+  // for "first at grade" calculations. The same row container is only walked
+  // once even if it carries multiple anchors pointing at the same route.
+  function parseAscentRows(doc) {
+    const rows = [];
+    const handledRows = new WeakSet();
+    for (const a of doc.querySelectorAll('a[href*="/crags/"]')) {
+      const href = a.getAttribute('href') || '';
+      const m = href.match(/^(?:https?:\/\/[^/]+)?\/crags\/([^/?#]+)\/routes\/([^/?#]+)/);
+      if (!m) continue;
+      const cragId = decodeURIComponent(m[1]);
+      const routeId = decodeURIComponent(m[2]);
+
+      const row = a.closest('tr, li, article, .feed-item, .ascent-row, .activity-item, .ascent') || a.parentElement;
+      if (!row || handledRows.has(row)) continue;
+      handledRows.add(row);
+
+      // crag name: bare /crags/X anchor in the same row
+      let cragName = '';
+      for (const c of row.querySelectorAll('a[href]')) {
+        const ch = c.getAttribute('href') || '';
+        const cm = ch.match(/^(?:https?:\/\/[^/]+)?\/crags\/([^/?#]+)\/?$/);
+        if (cm && decodeURIComponent(cm[1]) === cragId) {
+          cragName = (c.textContent || '').trim();
+          if (cragName) break;
+        }
+      }
+
+      const routeName = (a.textContent || '').trim();
+      // grade: scan row text but exclude the route name to avoid name-collisions
+      const rowText = (row.textContent || '').replace(routeName, ' ');
+      const grade = findGradeInText(rowText);
+      const date = findDateInRow(row);
+
+      rows.push({
+        key: `${cragId}/${routeId}`,
+        cragId,
+        cragName,
+        routeName,
+        gradeInt: grade ? grade.gi : 0,
+        gradeLabel: grade ? grade.label : '',
+        genre: grade ? grade.genre : '',
+        date: date || '',
+      });
+    }
+    return rows;
+  }
+
+  // Collapse multi-event ascent rows down to one entry per route, keeping the
+  // *earliest* date. That's what "first at grade" should reflect, regardless
+  // of how many times you've redpointed it since.
+  function dedupeKeepEarliest(rows) {
+    const byKey = new Map();
+    for (const r of rows) {
+      const prev = byKey.get(r.key);
+      if (!prev) { byKey.set(r.key, r); continue; }
+      const prevHasDate = !!prev.date;
+      const nextHasDate = !!r.date;
+      if (nextHasDate && (!prevHasDate || r.date < prev.date)) {
+        // Take the earlier-dated row but keep any non-empty fields the first row had.
+        byKey.set(r.key, {
+          ...prev,
+          ...r,
+          cragName: r.cragName || prev.cragName,
+          routeName: r.routeName || prev.routeName,
+          gradeInt: r.gradeInt || prev.gradeInt,
+          gradeLabel: r.gradeLabel || prev.gradeLabel,
+          genre: r.genre || prev.genre,
+        });
+      } else if (!prevHasDate && !nextHasDate) {
+        // Neither dated — keep whichever has more metadata.
+        if ((r.gradeInt && !prev.gradeInt) || (r.cragName && !prev.cragName)) {
+          byKey.set(r.key, r);
+        }
+      }
+    }
+    return [...byKey.values()];
+  }
+
+  async function fetchUserList(user, kind, onProgress) {
+    // kind: 'done' (→ /climbers/U/ascents) or 'todo' (→ /climbers/U/ascents/todo)
+    const base = kind === 'todo'
+      ? `/climbers/${encodeURIComponent(user)}/ascents/todo`
+      : `/climbers/${encodeURIComponent(user)}/ascents`;
+    if (onProgress) onProgress(`Fetching ${kind} (page 1)…`);
+    const doc0 = await fetchHtml(base);
+    const rows = parseAscentRows(doc0);
+    const maxPage = maxPageInPager(doc0);
+    if (maxPage > 0) {
+      const pageRows = await Promise.all(
+        Array.from({ length: maxPage }, (_, i) => i + 1).map(async (p) => {
+          try {
+            const u = `${base}?page=${p}`;
+            const d = await fetchHtml(u);
+            if (onProgress) onProgress(`Fetching ${kind} (page ${p + 1} of ${maxPage + 1})…`);
+            return parseAscentRows(d);
+          } catch { return []; }
+        })
+      );
+      for (const batch of pageRows) rows.push(...batch);
+    }
+    return dedupeKeepEarliest(rows);
+  }
+
+  // Fetch a single crag page and try to derive total route counts + grade
+  // histogram. Best-effort: tries embedded RouteList JSON first, then falls
+  // back to counting unique route links on the page.
+  async function fetchCragTotal(cragId) {
+    try {
+      const doc = await fetchHtml(`/crags/${encodeURIComponent(cragId)}`);
+      const tag = doc.querySelector('script[data-component-name="RouteList"]');
+      if (tag) {
+        try {
+          const store = JSON.parse(tag.textContent);
+          if (store && Array.isArray(store.routes)) {
+            const byGenre = {};
+            const byGrade = {};
+            let name = '';
+            for (const r of store.routes) {
+              const g = r.genre || 'Other';
+              byGenre[g] = (byGenre[g] || 0) + 1;
+              const gi = r.grade_int || 0;
+              if (gi) byGrade[gi] = (byGrade[gi] || 0) + 1;
+              if (!name) name = r.crag_name || '';
+            }
+            return { name, total: store.routes.length, byGenre, byGrade };
+          }
+        } catch {}
+      }
+      // Fallback: count distinct route hrefs.
+      const seen = new Set();
+      for (const a of doc.querySelectorAll(`a[href*="/crags/${encodeURIComponent(cragId)}/routes/"]`)) {
+        const m = (a.getAttribute('href') || '').match(/\/routes\/([^/?#]+)/);
+        if (m) seen.add(decodeURIComponent(m[1]));
+      }
+      const nameEl = doc.querySelector('h1, .crag-title, .crag-header h1');
+      const name = nameEl ? (nameEl.textContent || '').trim() : '';
+      return { name, total: seen.size, byGenre: {}, byGrade: {} };
+    } catch {
+      return null;
+    }
+  }
+
+  // ── State & rendering ─────────────────────────────────────────────
+  const state = {
+    user: '',
+    done: [],         // [{key, cragId, ...}]
+    todo: [],         // [{key, cragId, ...}]
+    cragTotals: {},   // cragId → { name, total, byGenre, byGrade, t }
+    cragsAggregated: new Map(), // cragId → aggregated stats
+    activeGenreNext: 'all',
+    activeGenreCrags: 'all',
+    cragSort: { col: 'todo', dir: 'desc' },
+    activeYear: null,     // 'all' or 'YYYY'
+    compareYear: null,    // 'YYYY' to compare against, or null
+    selectedMonth: null,  // 1..12 or null
+    selectedCragId: null, // crag spotlight
+  };
+
+  const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+  const $ = (sel) => document.querySelector(sel);
+  const statusEl = $('#mc-status');
+  const statusTextEl = $('#mc-status-text');
+  const spinnerEl = $('#mc-spinner');
+
+  function setStatus(text, busy, isError) {
+    statusTextEl.textContent = text || '';
+    statusTextEl.classList.toggle('error', !!isError);
+    spinnerEl.hidden = !busy;
+  }
+
+  function hideStatus() {
+    statusEl.hidden = true;
+  }
+
+  function showStatus() {
+    statusEl.hidden = false;
+  }
+
+  function uniqGenres(rows) {
+    const s = new Set();
+    for (const r of rows) if (r.genre) s.add(r.genre);
+    return [...s].sort();
+  }
+
+  function aggregate() {
+    // Build per-crag aggregation including a "firsts" map per genre.
+    const crags = new Map();
+    function get(id) {
+      if (!crags.has(id)) {
+        crags.set(id, {
+          id,
+          name: '',
+          done: [],
+          todo: [],
+          total: null,
+          totalsByGenre: {},
+          totalsByGrade: {},
+          firsts: {}, // `${genre}:${gi}` → { date, routeName } for the earliest send of that grade
+        });
+      }
+      return crags.get(id);
+    }
+    for (const r of state.done) {
+      const c = get(r.cragId);
+      c.done.push(r);
+      if (r.cragName && !c.name) c.name = r.cragName;
+    }
+    for (const r of state.todo) {
+      const c = get(r.cragId);
+      c.todo.push(r);
+      if (r.cragName && !c.name) c.name = r.cragName;
+    }
+    for (const [id, totals] of Object.entries(state.cragTotals)) {
+      const c = get(id);
+      if (totals && totals.total != null) c.total = totals.total;
+      if (totals && totals.byGenre) c.totalsByGenre = totals.byGenre;
+      if (totals && totals.byGrade) c.totalsByGrade = totals.byGrade;
+      if (totals && totals.name && !c.name) c.name = totals.name;
+    }
+
+    // Compute global "first at grade" per genre across all done routes.
+    // A crag earns the "first 7A" badge if it contains the user's earliest
+    // dated send at that grade (per genre).
+    const firstsByGenreGrade = {}; // genre → gi → { date, cragId, routeName }
+    for (const r of state.done) {
+      if (!r.gradeInt || !r.date) continue;
+      const g = r.genre || 'Unknown';
+      const byGrade = firstsByGenreGrade[g] = firstsByGenreGrade[g] || {};
+      const prev = byGrade[r.gradeInt];
+      if (!prev || r.date < prev.date) {
+        byGrade[r.gradeInt] = { date: r.date, cragId: r.cragId, routeName: r.routeName, gradeLabel: r.gradeLabel };
+      }
+    }
+    for (const [genre, byGrade] of Object.entries(firstsByGenreGrade)) {
+      for (const [gi, entry] of Object.entries(byGrade)) {
+        const c = crags.get(entry.cragId);
+        if (!c) continue;
+        c.firsts[`${genre}:${gi}`] = entry;
+      }
+    }
+
+    state.cragsAggregated = crags;
+    state.firstsByGenreGrade = firstsByGenreGrade;
+  }
+
+  function genresPresent() {
+    const s = new Set();
+    for (const r of state.done) if (r.genre) s.add(r.genre);
+    for (const r of state.todo) if (r.genre) s.add(r.genre);
+    return [...s].sort();
+  }
+
+  function renderTabs(container, current, onSelect) {
+    container.innerHTML = '';
+    const genres = ['all', ...genresPresent()];
+    for (const g of genres) {
+      const btn = document.createElement('button');
+      btn.textContent = g === 'all' ? 'All' : g;
+      if (g === current) btn.dataset.active = '1';
+      btn.addEventListener('click', () => onSelect(g));
+      container.appendChild(btn);
+    }
+  }
+
+  // ── Render: summary ───────────────────────────────────────────────
+  // For each genre with any dated send, return the highest grade hit.
+  // Genres without a determinable type land under "Other" so they don't get
+  // misleadingly compared against Boulder/Sport.
+  function hardestByGenre(rows) {
+    const map = new Map(); // genre → { gi, label }
+    for (const r of rows) {
+      if (!r.gradeInt) continue;
+      const g = r.genre || 'Other';
+      const prev = map.get(g);
+      if (!prev || r.gradeInt > prev.gi) {
+        map.set(g, { gi: r.gradeInt, label: r.gradeLabel || intToLabel(r.gradeInt, g) });
+      }
+    }
+    return map;
+  }
+
+  const GENRE_ORDER = ['Boulder', 'Sport', 'Traditional', 'DWS', 'Other'];
+  function sortedGenres(map) {
+    const present = [...map.keys()];
+    present.sort((a, b) => {
+      const ia = GENRE_ORDER.indexOf(a); const ib = GENRE_ORDER.indexOf(b);
+      return (ia === -1 ? 99 : ia) - (ib === -1 ? 99 : ib);
+    });
+    return present;
+  }
+
+  function renderSummary() {
+    const el = $('#mc-summary');
+    const cragCount = state.cragsAggregated.size;
+    const knownTotals = [...state.cragsAggregated.values()].filter(c => c.total != null && c.total > 0);
+    const completionPct = knownTotals.length === 0 ? null : (
+      knownTotals.reduce((s, c) => s + Math.min(1, c.done.length / Math.max(1, c.total)), 0) / knownTotals.length * 100
+    );
+    const cards = [
+      { v: state.done.length, l: 'Sends logged' },
+      { v: state.todo.length, l: 'On todo' },
+      { v: cragCount, l: 'Crags touched' },
+      {
+        v: completionPct == null ? '—' : `${completionPct.toFixed(1)}%`,
+        l: 'Avg completion (known crags)',
+      },
+    ];
+    const hardest = hardestByGenre(state.done);
+    for (const g of sortedGenres(hardest)) {
+      const h = hardest.get(g);
+      cards.push({ v: h.label, l: `Hardest ${g}` });
+    }
+    if (!hardest.size) cards.push({ v: '—', l: 'Hardest send' });
+
+    el.innerHTML = cards.map(c => `
+      <div class="mc-summary-card">
+        <div class="v">${escapeHtml(String(c.v))}</div>
+        <div class="l">${escapeHtml(c.l)}</div>
+      </div>
+    `).join('');
+    el.hidden = false;
+  }
+
+  function escapeHtml(s) {
+    return String(s == null ? '' : s).replace(/[&<>"']/g, c =>
+      ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  }
+
+  // ── Render: where to go next ──────────────────────────────────────
+  // Score = (open todos in genre) * (1 + ln(1 + done_at_crag_in_genre)) — favours
+  // crags where you have an active project list AND some history, but doesn't
+  // ignore brand-new wishlists.
+  function renderNext() {
+    const card = $('#mc-next-card');
+    const list = $('#mc-next-list');
+    const genre = state.activeGenreNext;
+    renderTabs($('#mc-next-tabs'), genre, (g) => { state.activeGenreNext = g; renderNext(); });
+    const items = [];
+    for (const c of state.cragsAggregated.values()) {
+      const todos = c.todo.filter(r => genre === 'all' || r.genre === genre);
+      if (!todos.length) continue;
+      const doneAtCrag = c.done.filter(r => genre === 'all' || r.genre === genre).length;
+      const hardestTodoGi = todos.reduce((mx, r) => Math.max(mx, r.gradeInt || 0), 0);
+      const score = todos.length * (1 + Math.log1p(doneAtCrag));
+      items.push({ c, todos, doneAtCrag, hardestTodoGi, score });
+    }
+    items.sort((a, b) => b.score - a.score);
+    const top = items.slice(0, 8);
+    if (!top.length) {
+      list.innerHTML = `<div class="mc-card-sub" style="padding:14px 16px;">No open todos in this genre yet.</div>`;
+      card.hidden = false;
+      return;
+    }
+    list.innerHTML = top.map(({ c, todos, doneAtCrag, hardestTodoGi, score }) => {
+      const name = c.name || c.id;
+      const totalKnown = c.total != null && c.total > 0;
+      const pct = totalKnown ? Math.min(100, (doneAtCrag / c.total) * 100) : null;
+      const hardestG = hardestTodoGi
+        ? intToLabel(hardestTodoGi, (todos.find(t => t.gradeInt === hardestTodoGi) || {}).genre)
+        : '';
+      return `
+        <div class="mc-next-item">
+          <div class="n"><a href="https://thetopo.com/crags/${escapeHtml(c.id)}" target="_blank" rel="noopener">${escapeHtml(name)}</a></div>
+          <div class="b">
+            <span class="pill">${todos.length} todo</span>
+            <span class="pill">${doneAtCrag} done${totalKnown ? ` / ${c.total}` : ''}</span>
+            ${hardestG ? `<span class="pill">top todo ${escapeHtml(hardestG)}</span>` : ''}
+          </div>
+          <div class="m">${pct != null ? `${pct.toFixed(0)}% of this crag climbed` : 'completion unknown — visit area routelist'}</div>
+          <div class="score">priority ${score.toFixed(1)}</div>
+        </div>
+      `;
+    }).join('');
+    card.hidden = false;
+  }
+
+  // ── Render: crags table ───────────────────────────────────────────
+  function renderHardestCell(map) {
+    if (!map || !map.size) return '—';
+    const parts = sortedGenres(map).map(g => {
+      const v = map.get(g);
+      const tag = g === 'Boulder' ? 'B' : g === 'Sport' ? 'S' : g === 'Traditional' ? 'T' : g === 'DWS' ? 'D' : g.slice(0, 1);
+      return `<span class="mc-hardest-pill" title="${escapeHtml(g)}"><span class="t">${tag}</span> ${escapeHtml(v.label)}</span>`;
+    });
+    return parts.join(' ');
+  }
+
+  function rowMatchesGenre(crag, genre) {
+    if (genre === 'all') return true;
+    return (crag.totalsByGenre && crag.totalsByGenre[genre] > 0)
+      || crag.done.some(r => r.genre === genre)
+      || crag.todo.some(r => r.genre === genre);
+  }
+
+  function cragGenreTotals(crag, genre) {
+    if (genre === 'all') return {
+      done: crag.done.length,
+      todo: crag.todo.length,
+      total: crag.total,
+      hardestByGenre: hardestByGenre(crag.done), // Map<genre, {gi, label}>
+      firsts: Object.values(crag.firsts),
+    };
+    const doneInGenre = crag.done.filter(r => r.genre === genre);
+    return {
+      done: doneInGenre.length,
+      todo: crag.todo.filter(r => r.genre === genre).length,
+      total: (crag.totalsByGenre && crag.totalsByGenre[genre]) || null,
+      hardestByGenre: hardestByGenre(doneInGenre),
+      firsts: Object.entries(crag.firsts).filter(([k]) => k.startsWith(`${genre}:`)).map(([, v]) => v),
+    };
+  }
+
+  function renderCrags() {
+    const card = $('#mc-crags-card');
+    const tbody = $('#mc-crags-tbody');
+    const genre = state.activeGenreCrags;
+    renderTabs($('#mc-crags-tabs'), genre, (g) => { state.activeGenreCrags = g; renderCrags(); });
+
+    const q = ($('#mc-crag-search').value || '').toLowerCase().trim();
+    const hideZeroDone = $('#mc-hide-zero-done').checked;
+    const onlyTodo = $('#mc-only-todo').checked;
+    const knownOnly = $('#mc-known-totals').checked;
+
+    const rows = [];
+    for (const c of state.cragsAggregated.values()) {
+      if (!rowMatchesGenre(c, genre)) continue;
+      const t = cragGenreTotals(c, genre);
+      if (hideZeroDone && t.done === 0 && t.todo === 0) continue;
+      if (onlyTodo && t.todo === 0) continue;
+      if (knownOnly && (t.total == null || t.total <= 0)) continue;
+      const name = c.name || c.id;
+      if (q && !name.toLowerCase().includes(q)) continue;
+      const pct = (t.total != null && t.total > 0) ? Math.min(100, (t.done / t.total) * 100) : null;
+      // sort proxy for the "hardest" column: max grade_int across the genres
+      // this row covers — within-genre comparisons stay sensible, cross-genre
+      // ordering is a rough convenience only.
+      let hardestSortKey = 0;
+      for (const v of t.hardestByGenre.values()) hardestSortKey = Math.max(hardestSortKey, v.gi);
+      rows.push({ id: c.id, name, ...t, pct, hardestSortKey });
+    }
+
+    const { col, dir } = state.cragSort;
+    rows.sort((a, b) => {
+      let va, vb;
+      if (col === 'hardest') { va = a.hardestSortKey; vb = b.hardestSortKey; }
+      else { va = a[col]; vb = b[col]; }
+      let c;
+      if (col === 'name') c = String(va || '').localeCompare(String(vb || ''));
+      else if (col === 'pct') {
+        // sort unknowns last regardless of direction
+        const ax = va == null ? -1 : va;
+        const bx = vb == null ? -1 : vb;
+        c = ax - bx;
+      } else c = (va || 0) - (vb || 0);
+      return dir === 'asc' ? c : -c;
+    });
+
+    tbody.innerHTML = rows.map(r => {
+      const pctCell = r.pct == null
+        ? `<span class="unknown">?</span>`
+        : `${r.pct.toFixed(0)}%<span class="pct-bar"><span class="pct-fill" style="width:${r.pct.toFixed(0)}%"></span></span>`;
+      const hardestCell = renderHardestCell(r.hardestByGenre);
+      const totalCell = r.total == null ? `<span class="unknown">?</span>` : r.total;
+      const notable = (r.firsts || []).slice().sort((a, b) => (b.gradeLabel || '').localeCompare(a.gradeLabel || '')).slice(0, 3).map(f => {
+        return `<span class="mc-firsts-pill" title="${escapeHtml(f.routeName || '')} — ${escapeHtml(f.date || '')}">★ first ${escapeHtml(f.gradeLabel || '')}</span>`;
+      }).join('');
+      const selected = state.selectedCragId === r.id ? '1' : '0';
+      return `<tr data-mc-crag="${escapeHtml(r.id)}" data-selected="${selected}">
+        <td><a href="https://thetopo.com/crags/${escapeHtml(r.id)}" target="_blank" rel="noopener" data-mc-stop>${escapeHtml(r.name)}</a></td>
+        <td class="mc-num">${r.done}</td>
+        <td class="mc-num">${r.todo}</td>
+        <td class="mc-num">${totalCell}</td>
+        <td class="mc-num">${pctCell}</td>
+        <td class="mc-num">${hardestCell}</td>
+        <td>${notable}</td>
+      </tr>`;
+    }).join('');
+
+    tbody.querySelectorAll('tr[data-mc-crag]').forEach(tr => {
+      tr.addEventListener('click', (e) => {
+        // Let the crag-name anchor open in a new tab as a normal link.
+        if (e.target.closest('[data-mc-stop]')) return;
+        const id = tr.getAttribute('data-mc-crag');
+        state.selectedCragId = state.selectedCragId === id ? null : id;
+        renderCrags();
+        renderSpotlight();
+      });
+    });
+
+    document.querySelectorAll('#mc-crags-table th[data-sort]').forEach(th => {
+      const isActive = th.getAttribute('data-sort') === col;
+      th.dataset.sorted = isActive ? dir : '';
+    });
+
+    card.hidden = false;
+  }
+
+  // ── Render: firsts ────────────────────────────────────────────────
+  function renderFirsts() {
+    const card = $('#mc-firsts-card');
+    const wrap = $('#mc-firsts');
+    const genres = Object.keys(state.firstsByGenreGrade || {}).sort();
+    if (!genres.length) { card.hidden = true; return; }
+    wrap.innerHTML = genres.map(genre => {
+      const byGrade = state.firstsByGenreGrade[genre];
+      const entries = Object.entries(byGrade).map(([gi, v]) => ({ gi: +gi, ...v }));
+      entries.sort((a, b) => b.gi - a.gi);
+      const rows = entries.map(e => {
+        const cragName = (state.cragsAggregated.get(e.cragId) || {}).name || e.cragId;
+        return `<div class="mc-firsts-row">
+          <span class="g">${escapeHtml(e.gradeLabel || intToLabel(e.gi, genre))}</span>
+          <span class="c"><a href="https://thetopo.com/crags/${escapeHtml(e.cragId)}" target="_blank" rel="noopener">${escapeHtml(cragName)}</a> — ${escapeHtml(e.routeName || '')}</span>
+          <span class="d">${escapeHtml(e.date || '')}</span>
+        </div>`;
+      }).join('');
+      return `<div class="mc-firsts-genre">
+        <h3>${escapeHtml(genre)}</h3>
+        ${rows}
+      </div>`;
+    }).join('');
+    card.hidden = false;
+  }
+
+  // ── Render: fun stats ─────────────────────────────────────────────
+  function renderStats() {
+    const card = $('#mc-stats-card');
+    const wrap = $('#mc-stats');
+    const stats = [];
+
+    // Most-climbed crag
+    let bestCrag = null;
+    for (const c of state.cragsAggregated.values()) {
+      if (!bestCrag || c.done.length > bestCrag.done.length) bestCrag = c;
+    }
+    if (bestCrag && bestCrag.done.length) {
+      stats.push({ l: 'Most-climbed crag', v: bestCrag.name || bestCrag.id, h: `${bestCrag.done.length} sends` });
+    }
+
+    // Most-active day: any single calendar date with the most sends.
+    const byDay = new Map();
+    for (const r of state.done) {
+      if (!r.date) continue;
+      byDay.set(r.date, (byDay.get(r.date) || 0) + 1);
+    }
+    if (byDay.size) {
+      const top = [...byDay.entries()].sort((a, b) => b[1] - a[1])[0];
+      const sample = state.done.find(r => r.date === top[0]);
+      stats.push({ l: 'Biggest day', v: `${top[1]} sends`, h: `${top[0]}${sample && sample.cragName ? ` at ${sample.cragName}` : ''}` });
+    }
+
+    // Longest send streak (consecutive calendar days with at least one send).
+    if (byDay.size) {
+      const dates = [...byDay.keys()].sort();
+      let best = 1, run = 1, bestEnd = dates[0];
+      for (let i = 1; i < dates.length; i++) {
+        const prev = new Date(dates[i - 1]);
+        const cur = new Date(dates[i]);
+        const diff = Math.round((cur - prev) / (24 * 3600 * 1000));
+        if (diff === 1) { run++; if (run > best) { best = run; bestEnd = dates[i]; } }
+        else run = 1;
+      }
+      if (best > 1) stats.push({ l: 'Longest send streak', v: `${best} days`, h: `ending ${bestEnd}` });
+    }
+
+    // Closest-to-finished crag (highest known completion % under 100)
+    let closest = null;
+    for (const c of state.cragsAggregated.values()) {
+      if (!c.total || c.total <= 0) continue;
+      const pct = (c.done.length / c.total) * 100;
+      if (pct >= 100) continue;
+      if (!closest || pct > closest.pct) closest = { c, pct };
+    }
+    if (closest) {
+      stats.push({
+        l: 'Closest to finishing',
+        v: closest.c.name || closest.c.id,
+        h: `${closest.pct.toFixed(0)}% — ${closest.c.total - closest.c.done.length} routes left`,
+      });
+    }
+
+    // Fully sent crags
+    const fullySent = [...state.cragsAggregated.values()].filter(c => c.total > 0 && c.done.length >= c.total);
+    if (fullySent.length) {
+      stats.push({ l: 'Crags fully sent', v: fullySent.length, h: fullySent.slice(0, 3).map(c => c.name || c.id).join(', ') });
+    }
+
+    // Hardest-grade stats, split per genre — comparing 7A boulder to 7a sport
+    // is apples-to-oranges, so each genre gets its own card.
+    const peakByGenre = new Map(); // genre → { gi, count }
+    for (const r of state.done) {
+      if (!r.gradeInt) continue;
+      const g = r.genre || 'Other';
+      const prev = peakByGenre.get(g);
+      if (!prev || r.gradeInt > prev.gi) peakByGenre.set(g, { gi: r.gradeInt, count: 0 });
+    }
+    for (const r of state.done) {
+      if (!r.gradeInt) continue;
+      const g = r.genre || 'Other';
+      const peak = peakByGenre.get(g);
+      if (peak && r.gradeInt === peak.gi) peak.count++;
+    }
+    for (const g of sortedGenres(peakByGenre)) {
+      const p = peakByGenre.get(g);
+      stats.push({
+        l: `Sends at hardest ${g}`,
+        v: p.count,
+        h: intToLabel(p.gi, g),
+      });
+    }
+
+    if (!stats.length) { card.hidden = true; return; }
+    wrap.innerHTML = stats.map(s => `
+      <div class="mc-stat">
+        <div class="l">${escapeHtml(s.l)}</div>
+        <div class="v">${escapeHtml(String(s.v))}</div>
+        ${s.h ? `<div class="h">${escapeHtml(s.h)}</div>` : ''}
+      </div>
+    `).join('');
+    card.hidden = false;
+  }
+
+  // ── Render: activity (year/month/compare) ─────────────────────────
+  function buildYearMonthCounts(rows) {
+    // returns { yearTotals: {YYYY: n}, byYearMonth: {YYYY: [12]int}, years: [YYYY...] sorted asc }
+    const yearTotals = {};
+    const byYearMonth = {};
+    for (const r of rows) {
+      if (!r.date) continue;
+      const m = r.date.match(/^(\d{4})-(\d{2})/);
+      if (!m) continue;
+      const y = m[1]; const mo = +m[2];
+      yearTotals[y] = (yearTotals[y] || 0) + 1;
+      const arr = byYearMonth[y] || (byYearMonth[y] = new Array(12).fill(0));
+      if (mo >= 1 && mo <= 12) arr[mo - 1]++;
+    }
+    const years = Object.keys(yearTotals).sort();
+    return { yearTotals, byYearMonth, years };
+  }
+
+  function deltaPill(curr, prev) {
+    if (prev == null) return '';
+    const diff = curr - prev;
+    const cls = diff > 0 ? 'pos' : diff < 0 ? 'neg' : 'flat';
+    const sign = diff > 0 ? '+' : diff < 0 ? '' : '±';
+    return `<span class="delta ${cls}">${sign}${diff} vs ${escapeHtml(state.compareYear || 'prev')}</span>`;
+  }
+
+  function renderActivity() {
+    const card = $('#mc-activity-card');
+    const ctrls = $('#mc-activity-controls');
+    const body = $('#mc-activity-body');
+    const { yearTotals, byYearMonth, years } = buildYearMonthCounts(state.done);
+    if (!years.length) { card.hidden = true; return; }
+
+    // Default active year: most-recent. Compare default: previous year if exists.
+    if (state.activeYear == null) state.activeYear = years[years.length - 1];
+    if (state.activeYear !== 'all' && !years.includes(state.activeYear)) {
+      state.activeYear = years[years.length - 1];
+    }
+
+    const yearChips = ['all', ...years].map(y => {
+      const lbl = y === 'all' ? 'All time' : y;
+      const count = y === 'all' ? state.done.filter(r => r.date).length : (yearTotals[y] || 0);
+      return `<button class="mc-chip" data-mc-year="${y}" data-active="${y === state.activeYear ? '1' : '0'}">${lbl}<span class="m" style="opacity:0.7;margin-left:6px;">${count}</span></button>`;
+    }).join('');
+
+    const yearsForCompare = years.filter(y => y !== state.activeYear);
+    const compareOptions = ['off', ...yearsForCompare].map(y => {
+      const lbl = y === 'off' ? 'Off' : y;
+      const active = state.compareYear === y || (y === 'off' && !state.compareYear);
+      return `<button class="mc-chip" data-mc-compare="${y}" data-active="${active ? '1' : '0'}">${lbl}</button>`;
+    }).join('');
+
+    ctrls.innerHTML = `
+      <div class="mc-chip-row"><span class="lbl">Year</span>${yearChips}</div>
+      <div class="mc-chip-row"><span class="lbl">Compare</span>${compareOptions}</div>
+    `;
+
+    ctrls.querySelectorAll('[data-mc-year]').forEach(b => {
+      b.addEventListener('click', () => {
+        state.activeYear = b.getAttribute('data-mc-year');
+        state.selectedMonth = null;
+        if (state.compareYear === state.activeYear) state.compareYear = null;
+        renderActivity();
+      });
+    });
+    ctrls.querySelectorAll('[data-mc-compare]').forEach(b => {
+      b.addEventListener('click', () => {
+        const v = b.getAttribute('data-mc-compare');
+        state.compareYear = v === 'off' ? null : v;
+        renderActivity();
+      });
+    });
+
+    function chartFor(year) {
+      const counts = byYearMonth[year] || new Array(12).fill(0);
+      const max = Math.max(1, ...counts);
+      const months = MONTHS.map((name, i) => {
+        const n = counts[i];
+        const pct = (n / max) * 100;
+        const selected = state.selectedMonth === (i + 1) ? '1' : '0';
+        const zero = n === 0 ? '1' : '0';
+        return `<div class="mc-month" data-mc-month="${i + 1}" data-selected="${selected}" data-zero="${zero}" title="${escapeHtml(name)} ${escapeHtml(year)}: ${n} sends">
+          <div class="num">${n ? n : ''}</div>
+          <div class="bar" style="height:${pct.toFixed(1)}%"></div>
+          <div class="lbl">${escapeHtml(name.slice(0, 1))}</div>
+        </div>`;
+      }).join('');
+      return `<div class="mc-months-row">
+        <div class="ylabel">${escapeHtml(year)} · ${counts.reduce((a, b) => a + b, 0)} sends</div>
+        <div class="mc-months">${months}</div>
+      </div>`;
+    }
+
+    let bodyHtml = '';
+    if (state.activeYear === 'all') {
+      // Stack each year row when "all" is selected — gives the historical view.
+      bodyHtml = years.map(y => chartFor(y)).join('');
+    } else {
+      bodyHtml = chartFor(state.activeYear);
+      if (state.compareYear) bodyHtml += chartFor(state.compareYear);
+    }
+
+    // Summary tiles for the active scope.
+    const tiles = [];
+    if (state.activeYear !== 'all') {
+      const total = yearTotals[state.activeYear] || 0;
+      const prev = state.compareYear ? (yearTotals[state.compareYear] || 0) : null;
+      const counts = byYearMonth[state.activeYear] || new Array(12).fill(0);
+      const topIdx = counts.indexOf(Math.max(...counts));
+      const daysSet = new Set();
+      for (const r of state.done) {
+        if (r.date && r.date.startsWith(state.activeYear + '-')) daysSet.add(r.date);
+      }
+      tiles.push({ l: `Sends in ${state.activeYear}`, v: total, delta: deltaPill(total, prev) });
+      tiles.push({ l: 'Days climbed', v: daysSet.size });
+      tiles.push({ l: 'Top month', v: counts[topIdx] ? MONTHS[topIdx] : '—', h: counts[topIdx] ? `${counts[topIdx]} sends` : '' });
+
+      // Hardest per genre for this year
+      const yearRows = state.done.filter(r => r.date && r.date.startsWith(state.activeYear + '-'));
+      const hardest = hardestByGenre(yearRows);
+      for (const g of sortedGenres(hardest)) {
+        const cur = hardest.get(g);
+        let dlt = '';
+        if (state.compareYear) {
+          const cmpRows = state.done.filter(r => r.date && r.date.startsWith(state.compareYear + '-'));
+          const cmpHard = hardestByGenre(cmpRows).get(g);
+          if (cmpHard) {
+            const diff = cur.gi - cmpHard.gi;
+            const cls = diff > 0 ? 'pos' : diff < 0 ? 'neg' : 'flat';
+            dlt = `<span class="delta ${cls}">${diff === 0 ? '±0' : (diff > 0 ? '+' : '') + (diff / 50).toFixed(0) + ' steps'}</span>`;
+          }
+        }
+        tiles.push({ l: `Hardest ${g}`, v: cur.label, delta: dlt });
+      }
+    } else {
+      tiles.push({ l: 'Total dated sends', v: state.done.filter(r => r.date).length });
+      tiles.push({ l: 'Years climbing', v: years.length });
+    }
+
+    // Selected month detail
+    let detailHtml = '';
+    if (state.activeYear !== 'all' && state.selectedMonth) {
+      const prefix = `${state.activeYear}-${String(state.selectedMonth).padStart(2, '0')}-`;
+      const rows = state.done.filter(r => r.date && r.date.startsWith(prefix));
+      rows.sort((a, b) => (a.date || '').localeCompare(b.date || ''));
+      const cmpRows = state.compareYear
+        ? state.done.filter(r => r.date && r.date.startsWith(`${state.compareYear}-${String(state.selectedMonth).padStart(2, '0')}-`))
+        : null;
+      const cmpDelta = cmpRows ? deltaPill(rows.length, cmpRows.length) : '';
+      detailHtml = `
+        <div class="mc-month-detail">
+          <h4>${escapeHtml(MONTHS[state.selectedMonth - 1])} ${escapeHtml(state.activeYear)} — ${rows.length} sends ${cmpDelta}</h4>
+          <ul>
+            ${rows.length === 0
+              ? '<li class="mc-status-text">No sends this month.</li>'
+              : rows.map(r => `<li>
+                  <span class="d">${escapeHtml(r.date)}</span>
+                  <span class="g">${escapeHtml(r.gradeLabel || '')}</span>
+                  <span class="r">${escapeHtml(r.routeName || '')}${r.cragName ? ' · <span style="color:var(--text-muted)">' + escapeHtml(r.cragName) + '</span>' : ''}</span>
+                </li>`).join('')}
+          </ul>
+        </div>
+      `;
+    }
+
+    body.innerHTML = `
+      ${bodyHtml}
+      ${tiles.length ? `<div class="mc-activity-summary">${tiles.map(t => `
+        <div class="mc-stat">
+          <div class="l">${escapeHtml(t.l)}</div>
+          <div class="v">${escapeHtml(String(t.v))} ${t.delta || ''}</div>
+          ${t.h ? `<div class="h">${escapeHtml(t.h)}</div>` : ''}
+        </div>
+      `).join('')}</div>` : ''}
+      ${detailHtml}
+    `;
+
+    body.querySelectorAll('[data-mc-month]').forEach(el => {
+      el.addEventListener('click', () => {
+        const m = +el.getAttribute('data-mc-month');
+        state.selectedMonth = state.selectedMonth === m ? null : m;
+        renderActivity();
+      });
+    });
+
+    card.hidden = false;
+  }
+
+  // ── Render: crag spotlight ────────────────────────────────────────
+  function renderSpotlight() {
+    const card = $('#mc-spotlight-card');
+    const title = $('#mc-spotlight-title');
+    const sub = $('#mc-spotlight-sub');
+    const body = $('#mc-spotlight-body');
+
+    if (!state.selectedCragId) {
+      card.hidden = true;
+      return;
+    }
+    const c = state.cragsAggregated.get(state.selectedCragId);
+    if (!c) {
+      state.selectedCragId = null;
+      card.hidden = true;
+      return;
+    }
+
+    title.innerHTML = `Crag spotlight — <a href="https://thetopo.com/crags/${escapeHtml(c.id)}" target="_blank" rel="noopener">${escapeHtml(c.name || c.id)}</a>
+      <button class="mc-spotlight-close" id="mc-spotlight-close" title="Clear">×</button>`;
+    title.querySelector('#mc-spotlight-close').addEventListener('click', () => {
+      state.selectedCragId = null;
+      renderCrags();
+      renderSpotlight();
+    });
+    sub.textContent = `${c.done.length} sends · ${c.todo.length} todos${c.total ? ` · ${c.total} total routes` : ''}`;
+
+    // Day & year aggregates
+    const days = new Set();
+    const byYear = new Map(); // YYYY → { count, hardestByGenre: Map }
+    for (const r of c.done) {
+      if (r.date) days.add(r.date);
+      const y = r.date ? r.date.slice(0, 4) : '—';
+      let entry = byYear.get(y);
+      if (!entry) { entry = { count: 0, rows: [] }; byYear.set(y, entry); }
+      entry.count++;
+      entry.rows.push(r);
+    }
+
+    const tiles = [];
+    tiles.push({ l: 'Sends here', v: c.done.length });
+    tiles.push({ l: 'Days climbed', v: days.size });
+    if (c.total && c.total > 0) {
+      const pct = Math.min(100, (c.done.length / c.total) * 100);
+      tiles.push({ l: 'Crag completion', v: `${pct.toFixed(0)}%`, h: `${c.total - c.done.length} routes left` });
+    }
+    if (c.todo.length) tiles.push({ l: 'Todos here', v: c.todo.length });
+    const dated = c.done.filter(r => r.date);
+    if (dated.length) {
+      const sorted = dated.slice().sort((a, b) => a.date.localeCompare(b.date));
+      tiles.push({ l: 'First visit', v: sorted[0].date });
+      tiles.push({ l: 'Last visit', v: sorted[sorted.length - 1].date });
+    }
+    const hardest = hardestByGenre(c.done);
+    for (const g of sortedGenres(hardest)) {
+      tiles.push({ l: `Hardest ${g}`, v: hardest.get(g).label });
+    }
+
+    const yearsHtml = [...byYear.entries()]
+      .sort((a, b) => b[0].localeCompare(a[0]))
+      .map(([y, entry]) => {
+        const hardest = hardestByGenre(entry.rows);
+        const hardestStrs = sortedGenres(hardest).map(g => `${g[0]} ${hardest.get(g).label}`).join(' · ');
+        return `<div class="yr">
+          <div class="y">${escapeHtml(y)}</div>
+          <div class="n">${entry.count} sends</div>
+          ${hardestStrs ? `<div class="h">${escapeHtml(hardestStrs)}</div>` : ''}
+        </div>`;
+      }).join('');
+
+    // Days list
+    const dayCounts = new Map(); // date → { count, rows }
+    for (const r of c.done) {
+      if (!r.date) continue;
+      let entry = dayCounts.get(r.date);
+      if (!entry) { entry = { count: 0, rows: [] }; dayCounts.set(r.date, entry); }
+      entry.count++;
+      entry.rows.push(r);
+    }
+    const daysList = [...dayCounts.entries()]
+      .sort((a, b) => b[0].localeCompare(a[0]))
+      .map(([date, e]) => {
+        const sample = e.rows.slice().sort((a, b) => (b.gradeInt || 0) - (a.gradeInt || 0));
+        const hardestRoute = sample[0];
+        return `<li>
+          <span class="d">${escapeHtml(date)}</span>
+          <span class="c">${e.count}</span>
+          <span class="r">${hardestRoute ? `${escapeHtml(hardestRoute.gradeLabel || '')} ${escapeHtml(hardestRoute.routeName || '')}${e.count > 1 ? ` <span style="color:var(--text-muted)">+ ${e.count - 1} more</span>` : ''}` : ''}</span>
+        </li>`;
+      }).join('');
+
+    body.innerHTML = `
+      <div class="mc-spotlight-stats">
+        ${tiles.map(t => `
+          <div class="mc-stat">
+            <div class="l">${escapeHtml(t.l)}</div>
+            <div class="v">${escapeHtml(String(t.v))}</div>
+            ${t.h ? `<div class="h">${escapeHtml(t.h)}</div>` : ''}
+          </div>
+        `).join('')}
+      </div>
+      ${yearsHtml ? `<div class="mc-spotlight-years">${yearsHtml}</div>` : ''}
+      ${daysList ? `<div class="mc-spotlight-days">
+        <h4>Days you've climbed here</h4>
+        <ul>${daysList}</ul>
+      </div>` : ''}
+    `;
+    card.hidden = false;
+    // Scroll into view so the spotlight is visible after clicking a row.
+    card.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  }
+
+  function renderAll() {
+    aggregate();
+    renderSummary();
+    renderActivity();
+    renderNext();
+    renderCrags();
+    renderSpotlight();
+    renderFirsts();
+    renderStats();
+    updateCacheInfo();
+  }
+
+  function updateCacheInfo() {
+    const knownTotals = [...state.cragsAggregated.values()].filter(c => c.total != null && c.total > 0).length;
+    const unknownTotals = [...state.cragsAggregated.values()].filter(c => c.total == null || c.total <= 0).length;
+    $('#mc-cache-info').textContent = `Cache: ${knownTotals} crags with totals, ${unknownTotals} unknown · click Refresh to re-fetch your ascents.`;
+  }
+
+  // ── Lazy-fill totals for crags we don't yet know about ─────────────
+  async function fillMissingCragTotals() {
+    const missing = [];
+    for (const c of state.cragsAggregated.values()) {
+      if (c.total == null || c.total <= 0) missing.push(c.id);
+    }
+    if (!missing.length) return;
+
+    const fetchedRaw = (await get(CRAG_FETCH_CACHE_KEY)) || {};
+    const now = Date.now();
+    const toFetch = missing.filter(id => {
+      const f = fetchedRaw[id];
+      return !f || (now - (f.t || 0)) > CRAG_PAGE_TTL_MS;
+    });
+    if (!toFetch.length) return;
+
+    setStatus(`Fetching crag totals (0/${toFetch.length})…`, true);
+    const CONCURRENCY = 4;
+    let i = 0, completed = 0;
+    const totalsRaw = (await get(CRAG_TOTALS_KEY)) || {};
+
+    async function worker() {
+      while (i < toFetch.length) {
+        const id = toFetch[i++];
+        const result = await fetchCragTotal(id);
+        completed++;
+        if (result && result.total > 0) {
+          totalsRaw[id] = { ...result, t: now };
+        }
+        fetchedRaw[id] = { t: now };
+        if (completed % 3 === 0 || completed === toFetch.length) {
+          setStatus(`Fetching crag totals (${completed}/${toFetch.length})…`, true);
+        }
+      }
+    }
+    await Promise.all(Array.from({ length: CONCURRENCY }, worker));
+    await set(CRAG_TOTALS_KEY, totalsRaw);
+    await set(CRAG_FETCH_CACHE_KEY, fetchedRaw);
+    state.cragTotals = totalsRaw;
+  }
+
+  // ── Boot ──────────────────────────────────────────────────────────
+  async function ensureUsername() {
+    const stored = await get(USERNAME_KEY);
+    const input = $('#mc-user-input');
+    if (stored) {
+      input.value = stored;
+      return stored;
+    }
+    return null;
+  }
+
+  async function loadAscents(useCache, user) {
+    const cached = await get(ASCENTS_CACHE_KEY);
+    const now = Date.now();
+    if (useCache && cached && cached.user === user && (now - (cached.t || 0)) < CACHE_TTL_MS) {
+      state.done = cached.done || [];
+      state.todo = cached.todo || [];
+      setStatus(`Loaded ${state.done.length} sends and ${state.todo.length} todos from cache.`, false);
+      return;
+    }
+    setStatus('Fetching your ascents…', true);
+    const [done, todo] = await Promise.all([
+      fetchUserList(user, 'done', (t) => setStatus(t, true)),
+      fetchUserList(user, 'todo', (t) => setStatus(t, true)),
+    ]);
+    state.done = done;
+    state.todo = todo;
+    await set(ASCENTS_CACHE_KEY, { user, t: Date.now(), done, todo });
+    setStatus(`Fetched ${done.length} sends and ${todo.length} todos.`, false);
+  }
+
+  async function loadAllForUser(user, useCache) {
+    state.user = user;
+    state.cragTotals = (await get(CRAG_TOTALS_KEY)) || {};
+    try {
+      await loadAscents(useCache, user);
+    } catch (err) {
+      setStatus(`Couldn't fetch ascents: ${err && err.message || err}. Make sure you're logged in to thetopo.com.`, false, true);
+      return;
+    }
+    if (!state.done.length && !state.todo.length) {
+      setStatus(`No ascents or todos found for "${user}". Either the username is wrong or you're not logged in to thetopo.com in this browser.`, false, true);
+      renderAll();
+      return;
+    }
+    aggregate();
+    renderSummary();
+    renderNext();
+    renderCrags();
+    renderFirsts();
+    renderStats();
+    updateCacheInfo();
+
+    await fillMissingCragTotals();
+    renderAll();
+    setStatus(`Showing ${state.done.length} sends · ${state.todo.length} todos · ${state.cragsAggregated.size} crags.`, false);
+  }
+
+  async function init() {
+    // Wire UI
+    $('#mc-refresh').addEventListener('click', async () => {
+      const user = ($('#mc-user-input').value || '').trim();
+      if (!user) { setStatus('Enter a username first.', false, true); return; }
+      await set(USERNAME_KEY, user);
+      await loadAllForUser(user, false);
+    });
+    $('#mc-clear').addEventListener('click', async () => {
+      await remove([ASCENTS_CACHE_KEY, CRAG_FETCH_CACHE_KEY]);
+      setStatus('Cache cleared. Hit Refresh to re-fetch.', false);
+      updateCacheInfo();
+    });
+    $('#mc-user-input').addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') $('#mc-refresh').click();
+    });
+    $('#mc-crag-search').addEventListener('input', () => renderCrags());
+    $('#mc-hide-zero-done').addEventListener('change', () => renderCrags());
+    $('#mc-only-todo').addEventListener('change', () => renderCrags());
+    $('#mc-known-totals').addEventListener('change', () => renderCrags());
+    document.querySelectorAll('#mc-crags-table th[data-sort]').forEach(th => {
+      th.addEventListener('click', () => {
+        const col = th.getAttribute('data-sort');
+        if (state.cragSort.col === col) {
+          state.cragSort.dir = state.cragSort.dir === 'asc' ? 'desc' : 'asc';
+        } else {
+          state.cragSort.col = col;
+          state.cragSort.dir = col === 'name' ? 'asc' : 'desc';
+        }
+        renderCrags();
+      });
+    });
+
+    const user = await ensureUsername();
+    if (!user) {
+      setStatus(`No username on file yet. Visit any thetopo.com area routelist while logged in, or type your username and click Refresh.`, false);
+      return;
+    }
+    setStatus(`Loading data for ${user}…`, true);
+    await loadAllForUser(user, true);
+  }
+
+  init();
+})();

@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>BetterCrags — My Crags</title>
+    <link rel="stylesheet" href="mycrags.css" />
+  </head>
+  <body>
+    <header class="mc-header">
+      <div class="mc-brand">
+        <div class="mc-title">BetterCrags</div>
+        <div class="mc-sub">My Crags</div>
+      </div>
+      <div class="mc-id">
+        <input type="text" id="mc-user-input" placeholder="thetopo username" autocomplete="off" />
+        <button type="button" id="mc-refresh" title="Re-fetch ascents and todo">Refresh</button>
+        <button type="button" id="mc-clear" title="Clear all caches and start fresh">Clear cache</button>
+      </div>
+    </header>
+
+    <section class="mc-status" id="mc-status">
+      <div class="mc-spinner" hidden id="mc-spinner"></div>
+      <div class="mc-status-text" id="mc-status-text">Detecting account…</div>
+    </section>
+
+    <section class="mc-summary" id="mc-summary" hidden></section>
+
+    <section class="mc-card" id="mc-activity-card" hidden>
+      <header class="mc-card-h">
+        <h2>Activity</h2>
+        <div class="mc-card-sub">Years and months you've climbed. Pick a year, drill into a month, compare side-by-side.</div>
+      </header>
+      <div class="mc-activity-controls" id="mc-activity-controls"></div>
+      <div class="mc-activity-body" id="mc-activity-body"></div>
+    </section>
+
+    <section class="mc-card" id="mc-next-card" hidden>
+      <header class="mc-card-h">
+        <h2>Where to go next</h2>
+        <div class="mc-card-sub">Crags ranked by undone todos, scaled by quality.</div>
+      </header>
+      <div class="mc-genre-tabs" id="mc-next-tabs"></div>
+      <div class="mc-next-list" id="mc-next-list"></div>
+    </section>
+
+    <section class="mc-card" id="mc-crags-card" hidden>
+      <header class="mc-card-h">
+        <h2>Your crags</h2>
+        <div class="mc-card-sub">Completion percent uses cached totals — visit an area routelist to fill in unknowns.</div>
+        <div class="mc-toolbar">
+          <input type="search" id="mc-crag-search" placeholder="Filter crags…" />
+          <label class="mc-check"><input type="checkbox" id="mc-hide-zero-done" checked /> Hide untouched crags (no sends & no todos)</label>
+          <label class="mc-check"><input type="checkbox" id="mc-only-todo" /> Only crags with todos</label>
+          <label class="mc-check"><input type="checkbox" id="mc-known-totals" /> Hide crags with unknown totals</label>
+        </div>
+      </header>
+      <div class="mc-genre-tabs" id="mc-crags-tabs"></div>
+      <div class="mc-table-wrap">
+        <table class="mc-table" id="mc-crags-table">
+          <thead>
+            <tr>
+              <th data-sort="name">Crag</th>
+              <th data-sort="done" class="mc-num">Done</th>
+              <th data-sort="todo" class="mc-num">Todo</th>
+              <th data-sort="total" class="mc-num">Total</th>
+              <th data-sort="pct" class="mc-num">% done</th>
+              <th data-sort="hardest" class="mc-num">Hardest</th>
+              <th>Notable</th>
+            </tr>
+          </thead>
+          <tbody id="mc-crags-tbody"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="mc-card" id="mc-spotlight-card" hidden>
+      <header class="mc-card-h">
+        <h2 id="mc-spotlight-title">Crag spotlight</h2>
+        <div class="mc-card-sub" id="mc-spotlight-sub">Click any crag row above to see its breakdown.</div>
+      </header>
+      <div class="mc-spotlight-body" id="mc-spotlight-body"></div>
+    </section>
+
+    <section class="mc-card" id="mc-firsts-card" hidden>
+      <header class="mc-card-h">
+        <h2>Grade firsts</h2>
+        <div class="mc-card-sub">The crag where each grade became real for you.</div>
+      </header>
+      <div class="mc-firsts" id="mc-firsts"></div>
+    </section>
+
+    <section class="mc-card" id="mc-stats-card" hidden>
+      <header class="mc-card-h">
+        <h2>Fun stats</h2>
+      </header>
+      <div class="mc-stat-grid" id="mc-stats"></div>
+    </section>
+
+    <footer class="mc-footer">
+      <span id="mc-cache-info"></span>
+    </footer>
+
+    <script src="mycrags.js"></script>
+  </body>
+</html>
