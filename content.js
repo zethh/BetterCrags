@@ -637,8 +637,12 @@
       try { syncGrade(); } catch {}
       try { syncAsc(); } catch {}
       try { refreshStars(); } catch {}
+      // If the saved state says disabled, run the full disengage flow so
+      // promos / native filter bar / readmore are restored.
+      if (saved && saved.enabled === false) setEnabled(false);
       hydrated = true;
       renderedKey = '';
+      syncBadge();
       if (typeof scheduleApply === 'function') scheduleApply();
     });
 
@@ -655,20 +659,21 @@
     function setEnabled(on) {
       panel.classList.toggle('tt-xf-off', !on);
       if (on) {
-        // re-engage
+        // Re-engage: show our panel + table, hide native ones, re-hide promos.
+        panel.style.removeProperty('display');
         const native = document.querySelector('table.route-list[data-tt-xf-native-table="1"]');
         if (native) native.style.setProperty('display', 'none', 'important');
         if (ourTable) ourTable.style.removeProperty('display');
+        hidePromos();
         renderedKey = '';
         scheduleApply();
       } else {
-        // restore site state
+        // Disengage entirely — page should look as if the extension wasn't installed.
+        panel.style.setProperty('display', 'none', 'important');
         if (ourTable) ourTable.style.setProperty('display', 'none', 'important');
         const native = document.querySelector('table.route-list[data-tt-xf-native-table="1"]');
         if (native) native.style.removeProperty('display');
-        // unhide native filter bar
         hideNativeFilters(null, false);
-        // unhide readmore
         const link = document.querySelector('a.readmore-toggle');
         if (link) {
           const wrap = link.closest('.text-center') || link;
@@ -676,6 +681,11 @@
           delete wrap.dataset.ttXfHidden;
         }
         readmoreHidden = false;
+        // Restore promo blocks we previously hid.
+        for (const el of document.querySelectorAll('[data-tt-xf-promo-hidden="1"]')) {
+          el.style.removeProperty('display');
+          delete el.dataset.ttXfPromoHidden;
+        }
       }
       setStickyTop(panel);
     }
@@ -1178,12 +1188,15 @@
     }
     warmRowCache();
     // Direct promo sweeps — the section sits outside our MutationObserver scope, so
-    // apply() won't fire for it. Hit a few delayed scans on init.
-    hidePromos();
-    setTimeout(hidePromos, 200);
-    setTimeout(hidePromos, 800);
-    setTimeout(hidePromos, 2500);
-    setTimeout(hidePromos, 6000);
+    // apply() won't fire for it. Hit a few delayed scans on init, but only while enabled.
+    function maybeHidePromos() {
+      if (!panel.classList.contains('tt-xf-off')) hidePromos();
+    }
+    maybeHidePromos();
+    setTimeout(maybeHidePromos, 200);
+    setTimeout(maybeHidePromos, 800);
+    setTimeout(maybeHidePromos, 2500);
+    setTimeout(maybeHidePromos, 6000);
   }
 
   if (document.readyState === 'loading') {
