@@ -45,6 +45,7 @@
 /* When disabled, the panel is fully hidden via inline display:none set in JS. */
 .tt-xf-title { font-weight: 700; font-size: 15px; letter-spacing: -0.01em; }
 .tt-xf-count { color: #6a7280; font-size: 12px; }
+.tt-xf-meta-progress { color: #2c7dd9; font-size: 12px; font-weight: 500; }
 
 .tt-xf-panel input[type="search"],
 .tt-xf-panel input[type="text"],

@@ -105,6 +105,19 @@
   function persistState(state) {
     try { chrome.storage.local.set({ [STATE_KEY]: state }); } catch {}
   }
+
+  const META_CACHE_KEY = 'bc_meta_cache_v1';
+  const META_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+  function loadMetaCacheRaw() {
+    return new Promise((resolve) => {
+      try {
+        chrome.storage.local.get(META_CACHE_KEY, (o) => resolve((o && o[META_CACHE_KEY]) || {}));
+      } catch { resolve({}); }
+    });
+  }
+  function saveMetaCacheRaw(obj) {
+    try { chrome.storage.local.set({ [META_CACHE_KEY]: obj }); } catch {}
+  }
   function captureState(panel) {
     return {
       search: panel.querySelector('[data-tt-xf-search]').value,
@@ -245,9 +258,45 @@
   // thetopo has a batch endpoint: /api/web01/search/photos?ids=A,B,C → { routes: [{id, photo_url}] }
   const ROUTE_IMG_CACHE = new Map(); // id (number) -> string url | '' (none)
 
-  // Per-route metadata (video/comment presence) — only fetched when the
-  // corresponding filter is active. Each fetch is a full route detail page.
-  const ROUTE_META_CACHE = new Map(); // id -> {video: bool, comment: bool} | null pending
+  // Per-route metadata (video/comment presence) — fetched when the
+  // corresponding filter is active. Entries are { video, comment, t } and
+  // persisted to chrome.storage with a 7-day TTL so we don't refetch route
+  // detail pages every session. `null` is a pending sentinel.
+  const ROUTE_META_CACHE = new Map();
+
+  let metaCacheDirty = false;
+  let metaSaveTimer = null;
+  function persistMetaCacheSoon() {
+    metaCacheDirty = true;
+    if (metaSaveTimer) return;
+    metaSaveTimer = setTimeout(() => {
+      metaSaveTimer = null;
+      if (!metaCacheDirty) return;
+      metaCacheDirty = false;
+      const obj = {};
+      for (const [id, entry] of ROUTE_META_CACHE) {
+        if (entry && typeof entry === 'object' && entry.t) obj[id] = entry;
+      }
+      saveMetaCacheRaw(obj);
+    }, 2000);
+  }
+
+  async function hydrateMetaCache() {
+    try {
+      const obj = await loadMetaCacheRaw();
+      const now = Date.now();
+      let kept = 0, dropped = 0;
+      for (const [id, entry] of Object.entries(obj)) {
+        if (entry && entry.t && (now - entry.t) < META_TTL_MS) {
+          ROUTE_META_CACHE.set(+id, entry);
+          kept++;
+        } else { dropped++; }
+      }
+      if (kept || dropped) log(`meta cache hydrated: ${kept} kept, ${dropped} expired`);
+    } catch (err) {
+      warn('hydrateMetaCache failed', err);
+    }
+  }
 
   async function fetchRouteMeta(href, signal) {
     try {
@@ -462,6 +511,7 @@
         <div class="tt-xf-brand">
           <span class="tt-xf-title">BetterCrags</span>
           <span class="tt-xf-count" data-tt-xf-count></span>
+          <span class="tt-xf-meta-progress" data-tt-xf-meta-progress hidden></span>
         </div>
         <input type="search" placeholder="Search by name…" data-tt-xf-search>
         <label class="tt-xf-field">
@@ -676,8 +726,8 @@
         persistState(captureState(panel));
       }, 200);
     }
-    // Load saved state asynchronously, then mark as hydrated so saves can begin.
-    loadSavedState().then(saved => {
+    // Load saved state + persisted meta cache in parallel, then mark hydrated.
+    Promise.all([loadSavedState(), hydrateMetaCache()]).then(([saved]) => {
       if (saved) applyState(panel, saved);
       try { syncGrade(); } catch {}
       try { syncAsc(); } catch {}
@@ -910,10 +960,33 @@
     let doneSet = null;
     const userListsAbort = new AbortController();
 
-    // Lazy per-route meta (video/comment) loading.
-    const MAX_META_CONCURRENT = 2;
+    // Per-route meta (video/comment) loading. Eagerly queued for the full
+    // filtered candidate set when the filter is active so the user gets a
+    // visible progress count. Results are persisted (7-day TTL) so subsequent
+    // sessions resolve from cache.
+    const MAX_META_CONCURRENT = 3;
     const metaQueue = [];
     let metaInFlight = 0;
+    let metaCheckTotal = 0;
+    let metaCheckDone = 0;
+    const metaProgressEl = panel.querySelector('[data-tt-xf-meta-progress]');
+
+    function updateMetaProgress() {
+      if (!metaProgressEl) return;
+      const remaining = metaCheckTotal - metaCheckDone;
+      if (metaCheckTotal === 0 || remaining <= 0) {
+        metaProgressEl.hidden = true;
+        metaProgressEl.textContent = '';
+        if (metaCheckTotal > 0 && remaining <= 0) {
+          metaCheckTotal = 0;
+          metaCheckDone = 0;
+        }
+      } else {
+        metaProgressEl.hidden = false;
+        metaProgressEl.textContent = ` · checking ${metaCheckDone}/${metaCheckTotal}…`;
+      }
+    }
+
     function pumpMetaQueue() {
       while (metaInFlight < MAX_META_CONCURRENT && metaQueue.length) {
         const task = metaQueue.shift();
@@ -921,54 +994,42 @@
         Promise.resolve().then(task).finally(() => { metaInFlight--; pumpMetaQueue(); });
       }
     }
-    const metaObserver = ('IntersectionObserver' in window) ? new IntersectionObserver((entries) => {
-      for (const e of entries) {
-        if (!e.isIntersecting) continue;
-        const tr = e.target;
-        metaObserver.unobserve(tr);
-        const id = +tr.dataset.routeId;
-        if (!id || ROUTE_META_CACHE.has(id)) continue;
-        const a = tr.querySelector('a[href*="/routes/"]');
-        const href = a && a.getAttribute('href');
-        if (!href) continue;
-        ROUTE_META_CACHE.set(id, null); // pending sentinel
+
+    function queueMetaForRoutes(candidates) {
+      let queued = 0;
+      for (const r of candidates) {
+        if (ROUTE_META_CACHE.has(r.id)) continue;
+        if (!r.crag_param_id || !r.param_id) continue;
+        const href = `/crags/${encodeURIComponent(r.crag_param_id)}/routes/${encodeURIComponent(r.param_id)}`;
+        ROUTE_META_CACHE.set(r.id, null);
+        queued++;
         metaQueue.push(async () => {
           const meta = await fetchRouteMeta(href);
           if (meta) {
-            ROUTE_META_CACHE.set(id, meta);
-            renderedKey = '';
-            scheduleApply();
+            ROUTE_META_CACHE.set(r.id, { video: meta.video, comment: meta.comment, t: Date.now() });
+            persistMetaCacheSoon();
           } else {
-            ROUTE_META_CACHE.delete(id);
+            ROUTE_META_CACHE.delete(r.id);
           }
+          metaCheckDone++;
+          updateMetaProgress();
+          renderedKey = '';
+          scheduleApply();
         });
-        pumpMetaQueue();
       }
-    }, { rootMargin: '800px 0px' }) : null;
-
-    function observeMetaFromIndex(startIdx) {
-      if (!ourTbody || !metaObserver) return;
-      const rows = ourTbody.children;
-      for (let i = startIdx; i < rows.length; i++) {
-        const tr = rows[i];
-        if (tr.dataset.bcMetaObs === '1') continue;
-        const id = +tr.dataset.routeId;
-        if (!id) continue;
-        tr.dataset.bcMetaObs = '1';
-        if (ROUTE_META_CACHE.has(id)) continue; // already fetched (or pending)
-        metaObserver.observe(tr);
+      if (queued > 0) {
+        metaCheckTotal += queued;
+        updateMetaProgress();
+        pumpMetaQueue();
       }
     }
 
-    function unobserveMetaAll() {
-      if (!ourTbody || !metaObserver) return;
-      for (const tr of ourTbody.children) {
-        if (tr.dataset.bcMetaObs === '1') {
-          metaObserver.unobserve(tr);
-          delete tr.dataset.bcMetaObs;
-        }
-      }
+    function cancelMetaQueue() {
+      // Drop pending work; in-flight tasks finish and update the cache.
       metaQueue.length = 0;
+      metaCheckTotal = 0;
+      metaCheckDone = 0;
+      updateMetaProgress();
     }
 
     // Lazy image loading via batched API.
@@ -1178,7 +1239,7 @@
           for (let i = 0; i < FIRST; i++) firstHtml += rowHtml(filtered[i], noImageUrl);
           ourTbody.innerHTML = firstHtml;
           observeImgsFromIndex(0);
-          if (needMeta) observeMetaFromIndex(0); else unobserveMetaAll();
+          if (needMeta) queueMetaForRoutes(filtered); else cancelMetaQueue();
 
           if (filtered.length > FIRST) {
             let i = FIRST;
@@ -1192,7 +1253,6 @@
               const prevRowCount = ourTbody.childElementCount;
               ourTbody.insertAdjacentHTML('beforeend', html);
               observeImgsFromIndex(prevRowCount);
-              if (needMeta) observeMetaFromIndex(prevRowCount);
               i = end;
               countEl.textContent = ` ${i}/${filtered.length}…`;
               if (i < filtered.length) {
