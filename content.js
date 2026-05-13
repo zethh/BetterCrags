@@ -1019,7 +1019,11 @@
             metaCheckDone++;
             updateMetaProgress();
           }
-          renderedKey = '';
+          // Let apply()'s fingerprint check decide whether to re-render.
+          // Each task flips one route's meta, so if its filter outcome
+          // changes, `filtered.length` shifts and fp differs naturally.
+          // Forcing renderedKey='' here re-rendered 1k rows ~30×/sec
+          // during meta fetch storms and starved click/typing handlers.
           scheduleApply();
         });
       }
