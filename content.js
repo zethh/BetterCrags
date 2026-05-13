@@ -25,6 +25,15 @@
     ['tradgear_required', 'Trad gear'],
   ];
 
+  // Display groupings for the feature pills.
+  const TAG_GROUPS = [
+    ['Hold type', ['crimpers', 'slopers', 'jugs', 'pockets', 'tufas', 'crack']],
+    ['Wall angle', ['roof', 'overhang', 'vertical', 'slab']],
+    ['Style', ['fingery', 'powerful', 'dyno', 'endurance', 'technical', 'mental', 'traverse']],
+    ['Other', ['sitstart', 'topslasthold', 'tradgear_required', 'dangerous']],
+  ];
+  const TAG_LABELS = Object.fromEntries(TAGS);
+
   const PROMO_MARKERS = [
     'climbing guide to your smartphone',
     'subscription also includes access',
@@ -112,6 +121,8 @@
       enabled: !panel.classList.contains('tt-xf-off'),
       todo: panel.querySelector('[data-tt-xf-list="todo"]')?.dataset.state || 'ignore',
       done: panel.querySelector('[data-tt-xf-list="done"]')?.dataset.state || 'ignore',
+      hasVideo: panel.querySelector('[data-tt-xf-meta="video"]')?.dataset.state || 'ignore',
+      hasComment: panel.querySelector('[data-tt-xf-meta="comment"]')?.dataset.state || 'ignore',
     };
   }
   function applyState(panel, state) {
@@ -147,6 +158,10 @@
     const doneBtn = panel.querySelector('[data-tt-xf-list="done"]');
     if (todoBtn && typeof state.todo === 'string') todoBtn.dataset.state = state.todo;
     if (doneBtn && typeof state.done === 'string') doneBtn.dataset.state = state.done;
+    const videoBtn = panel.querySelector('[data-tt-xf-meta="video"]');
+    const commentBtn = panel.querySelector('[data-tt-xf-meta="comment"]');
+    if (videoBtn && typeof state.hasVideo === 'string') videoBtn.dataset.state = state.hasVideo;
+    if (commentBtn && typeof state.hasComment === 'string') commentBtn.dataset.state = state.hasComment;
   }
 
   function readEmbeddedStore() {
@@ -229,6 +244,27 @@
 
   // thetopo has a batch endpoint: /api/web01/search/photos?ids=A,B,C → { routes: [{id, photo_url}] }
   const ROUTE_IMG_CACHE = new Map(); // id (number) -> string url | '' (none)
+
+  // Per-route metadata (video/comment presence) — only fetched when the
+  // corresponding filter is active. Each fetch is a full route detail page.
+  const ROUTE_META_CACHE = new Map(); // id -> {video: bool, comment: bool} | null pending
+
+  async function fetchRouteMeta(href, signal) {
+    try {
+      const res = await fetch(href, { credentials: 'include', signal });
+      if (!res.ok) return null;
+      const text = await res.text();
+      return {
+        video: /class\s*=\s*["']tag\s+video/.test(text),
+        comment: /class\s*=\s*["']tag\s+comment/.test(text),
+      };
+    } catch (err) {
+      if (err && err.name !== 'AbortError' && err.name !== 'TypeError') {
+        warn('fetchRouteMeta failed', href, err);
+      }
+      return null;
+    }
+  }
 
   async function fetchPhotosBatch(ids, signal) {
     const map = new Map();
@@ -482,12 +518,19 @@
             <span class="tt-xf-hint" data-tt-xf-lists-status></span>
           </div>
         </div>
-        <div class="tt-xf-row tt-xf-row-tags">
-          <span class="tt-xf-lbl tt-xf-lbl-inline">Features</span>
-          <div class="tt-xf-pills tt-xf-tags" data-tt-xf-tags>
-            ${TAGS.map(([k, l]) => `<button type="button" class="tt-xf-tag-pill" data-tt-xf-tag="${k}" data-state="ignore">${l}</button>`).join('')}
-          </div>
-        </div>
+        ${TAG_GROUPS.map(([label, keys]) => {
+          const extra = label === 'Other'
+            ? `<button type="button" class="tt-xf-tag-pill" data-tt-xf-meta="video" data-state="ignore" title="Routes with video beta (lazy-fetched)">Has video</button>`
+              + `<button type="button" class="tt-xf-tag-pill" data-tt-xf-meta="comment" data-state="ignore" title="Routes with comments (lazy-fetched)">Has comments</button>`
+            : '';
+          return `<div class="tt-xf-row tt-xf-row-tags">
+            <span class="tt-xf-lbl tt-xf-lbl-inline">${label}</span>
+            <div class="tt-xf-pills tt-xf-tags">
+              ${keys.map(k => `<button type="button" class="tt-xf-tag-pill" data-tt-xf-tag="${k}" data-state="ignore">${TAG_LABELS[k]}</button>`).join('')}
+              ${extra}
+            </div>
+          </div>`;
+        }).join('')}
         <div class="tt-xf-warn" data-tt-xf-warn hidden></div>
       </div>
     `;
@@ -522,7 +565,9 @@
     const hideNative = q('[data-tt-xf-hide-native]').checked;
     const todo = panel.querySelector('[data-tt-xf-list="todo"]')?.dataset.state || 'ignore';
     const done = panel.querySelector('[data-tt-xf-list="done"]')?.dataset.state || 'ignore';
-    return { search, sort, gradeMin, gradeMax, minRating, minAscents, maxAscents, genres, include, exclude, hideNative, todo, done };
+    const hasVideo = panel.querySelector('[data-tt-xf-meta="video"]')?.dataset.state || 'ignore';
+    const hasComment = panel.querySelector('[data-tt-xf-meta="comment"]')?.dataset.state || 'ignore';
+    return { search, sort, gradeMin, gradeMax, minRating, minAscents, maxAscents, genres, include, exclude, hideNative, todo, done, hasVideo, hasComment };
   }
 
   function matchesFilter(r, s) {
@@ -716,7 +761,7 @@
     panel.addEventListener('input', saveState);
     panel.addEventListener('change', saveState);
     panel.addEventListener('click', (e) => {
-      if (e.target.closest('[data-tt-xf-tag],[data-tt-xf-genre],[data-tt-xf-star],[data-tt-xf-reset]')) {
+      if (e.target.closest('[data-tt-xf-tag],[data-tt-xf-genre],[data-tt-xf-star],[data-tt-xf-list],[data-tt-xf-meta],[data-tt-xf-reset]')) {
         saveState();
       }
     });
@@ -728,7 +773,7 @@
         scheduleApply();
       });
     });
-    panel.querySelectorAll('[data-tt-xf-list]').forEach(b => {
+    panel.querySelectorAll('[data-tt-xf-list], [data-tt-xf-meta]').forEach(b => {
       b.addEventListener('click', () => {
         const cur = b.dataset.state || 'ignore';
         b.dataset.state = cur === 'ignore' ? 'include' : cur === 'include' ? 'exclude' : 'ignore';
@@ -840,7 +885,7 @@
       syncAsc();
       panel.querySelectorAll('[data-tt-xf-tag]').forEach(b => { b.dataset.state = 'ignore'; });
       panel.querySelectorAll('[data-tt-xf-genre]').forEach(b => { b.dataset.state = 'off'; });
-      panel.querySelectorAll('[data-tt-xf-list]').forEach(b => { b.dataset.state = 'ignore'; });
+      panel.querySelectorAll('[data-tt-xf-list], [data-tt-xf-meta]').forEach(b => { b.dataset.state = 'ignore'; });
       scheduleApply();
     });
 
@@ -864,6 +909,67 @@
     let todoSet = null;
     let doneSet = null;
     const userListsAbort = new AbortController();
+
+    // Lazy per-route meta (video/comment) loading.
+    const MAX_META_CONCURRENT = 2;
+    const metaQueue = [];
+    let metaInFlight = 0;
+    function pumpMetaQueue() {
+      while (metaInFlight < MAX_META_CONCURRENT && metaQueue.length) {
+        const task = metaQueue.shift();
+        metaInFlight++;
+        Promise.resolve().then(task).finally(() => { metaInFlight--; pumpMetaQueue(); });
+      }
+    }
+    const metaObserver = ('IntersectionObserver' in window) ? new IntersectionObserver((entries) => {
+      for (const e of entries) {
+        if (!e.isIntersecting) continue;
+        const tr = e.target;
+        metaObserver.unobserve(tr);
+        const id = +tr.dataset.routeId;
+        if (!id || ROUTE_META_CACHE.has(id)) continue;
+        const a = tr.querySelector('a[href*="/routes/"]');
+        const href = a && a.getAttribute('href');
+        if (!href) continue;
+        ROUTE_META_CACHE.set(id, null); // pending sentinel
+        metaQueue.push(async () => {
+          const meta = await fetchRouteMeta(href);
+          if (meta) {
+            ROUTE_META_CACHE.set(id, meta);
+            renderedKey = '';
+            scheduleApply();
+          } else {
+            ROUTE_META_CACHE.delete(id);
+          }
+        });
+        pumpMetaQueue();
+      }
+    }, { rootMargin: '800px 0px' }) : null;
+
+    function observeMetaFromIndex(startIdx) {
+      if (!ourTbody || !metaObserver) return;
+      const rows = ourTbody.children;
+      for (let i = startIdx; i < rows.length; i++) {
+        const tr = rows[i];
+        if (tr.dataset.bcMetaObs === '1') continue;
+        const id = +tr.dataset.routeId;
+        if (!id) continue;
+        tr.dataset.bcMetaObs = '1';
+        if (ROUTE_META_CACHE.has(id)) continue; // already fetched (or pending)
+        metaObserver.observe(tr);
+      }
+    }
+
+    function unobserveMetaAll() {
+      if (!ourTbody || !metaObserver) return;
+      for (const tr of ourTbody.children) {
+        if (tr.dataset.bcMetaObs === '1') {
+          metaObserver.unobserve(tr);
+          delete tr.dataset.bcMetaObs;
+        }
+      }
+      metaQueue.length = 0;
+    }
 
     // Lazy image loading via batched API.
     const BATCH_SIZE = 100;        // max ids per /api/web01/search/photos request
@@ -1035,6 +1141,7 @@
           return;
         }
 
+        const needMeta = state.hasVideo !== 'ignore' || state.hasComment !== 'ignore';
         const filtered = routes.filter(r => {
           if (!matchesFilter(r, state)) return false;
           if (state.todo !== 'ignore' || state.done !== 'ignore') {
@@ -1043,6 +1150,16 @@
             if (state.todo === 'exclude' && todoSet && todoSet.has(key)) return false;
             if (state.done === 'include' && !(doneSet && doneSet.has(key))) return false;
             if (state.done === 'exclude' && doneSet && doneSet.has(key)) return false;
+          }
+          if (needMeta) {
+            const meta = ROUTE_META_CACHE.get(r.id);
+            // unknown (undefined) or pending (null) → keep visible; will be re-evaluated as data lands
+            if (meta && typeof meta === 'object') {
+              if (state.hasVideo === 'include' && !meta.video) return false;
+              if (state.hasVideo === 'exclude' && meta.video) return false;
+              if (state.hasComment === 'include' && !meta.comment) return false;
+              if (state.hasComment === 'exclude' && meta.comment) return false;
+            }
           }
           return true;
         });
@@ -1061,6 +1178,7 @@
           for (let i = 0; i < FIRST; i++) firstHtml += rowHtml(filtered[i], noImageUrl);
           ourTbody.innerHTML = firstHtml;
           observeImgsFromIndex(0);
+          if (needMeta) observeMetaFromIndex(0); else unobserveMetaAll();
 
           if (filtered.length > FIRST) {
             let i = FIRST;
@@ -1074,6 +1192,7 @@
               const prevRowCount = ourTbody.childElementCount;
               ourTbody.insertAdjacentHTML('beforeend', html);
               observeImgsFromIndex(prevRowCount);
+              if (needMeta) observeMetaFromIndex(prevRowCount);
               i = end;
               countEl.textContent = ` ${i}/${filtered.length}…`;
               if (i < filtered.length) {

@@ -89,7 +89,9 @@
   color: #5b626b;
   white-space: nowrap;
 }
-.tt-xf-lbl-inline { align-self: flex-start; padding-top: 4px; }
+.tt-xf-lbl-inline { align-self: flex-start; padding-top: 4px; min-width: 80px; }
+.tt-xf-row-tags { padding: 2px 0; gap: 8px 12px; }
+.tt-xf-row-tags + .tt-xf-row-tags { border-top: 1px dashed #ebedf0; }
 .tt-xf-meta { font: 400 12px/1.2 inherit; color: #1d2228; text-transform: none; letter-spacing: 0; margin-left: 4px; display: inline-flex; align-items: center; gap: 2px; }
 .tt-xf-num-mini {
   width: 44px;
