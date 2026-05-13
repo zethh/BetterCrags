@@ -80,6 +80,19 @@
     ['name_desc', 'Name Z→A'],
   ];
 
+  function renderSortLevels(container, sorts) {
+    const list = sorts.length ? sorts : [SORT_OPTIONS[0][0]];
+    container.innerHTML = list.map((val, i) => `
+      <div class="tt-xf-sort-level">
+        ${i > 0 ? '<span class="tt-xf-sort-then">then by</span>' : ''}
+        <select data-tt-xf-sort-select>
+          ${SORT_OPTIONS.map(([v, l]) => `<option value="${v}"${v === val ? ' selected' : ''}>${l}</option>`).join('')}
+        </select>
+        ${i > 0 ? `<button type="button" class="tt-xf-sort-remove" data-idx="${i}" title="Remove this sort level">×</button>` : ''}
+      </div>
+    `).join('');
+  }
+
   const log = (...a) => console.log('[BetterCrags]', ...a);
   const warn = (...a) => console.warn('[BetterCrags]', ...a);
 
@@ -122,7 +135,7 @@
     return {
       search: panel.querySelector('[data-tt-xf-search]').value,
       crag: panel.querySelector('[data-tt-xf-crag]')?.value || '',
-      sort: panel.querySelector('[data-tt-xf-sort]').value,
+      sorts: [...panel.querySelectorAll('[data-tt-xf-sort-select]')].map(s => s.value),
       gminIdx: +panel.querySelector('[data-tt-xf-gmin]').value,
       gmaxIdx: +panel.querySelector('[data-tt-xf-gmax]').value,
       minStar: +(panel.dataset.minStar || 0),
@@ -146,9 +159,14 @@
       const cragEl = panel.querySelector('[data-tt-xf-crag]');
       if (cragEl) cragEl.value = state.crag;
     }
-    if (state.sort) {
-      const sortEl = panel.querySelector('[data-tt-xf-sort]');
-      if ([...sortEl.options].some(o => o.value === state.sort)) sortEl.value = state.sort;
+    const sortContainer = panel.querySelector('[data-tt-xf-sorts]');
+    if (sortContainer) {
+      const valid = new Set(SORT_OPTIONS.map(([v]) => v));
+      let list = [];
+      if (Array.isArray(state.sorts)) list = state.sorts.filter(v => valid.has(v));
+      else if (typeof state.sort === 'string' && valid.has(state.sort)) list = [state.sort];
+      if (!list.length) list = [SORT_OPTIONS[0][0]];
+      renderSortLevels(sortContainer, list);
     }
     const gmin = panel.querySelector('[data-tt-xf-gmin]');
     const gmax = panel.querySelector('[data-tt-xf-gmax]');
@@ -520,17 +538,16 @@
         </div>
         <input type="search" placeholder="Names (comma-separated)…" data-tt-xf-search>
         <input type="text" placeholder="Crags (comma-separated)…" data-tt-xf-crag>
-        <label class="tt-xf-field">
-          <span class="tt-xf-lbl">Sort</span>
-          <select data-tt-xf-sort>
-            ${SORT_OPTIONS.map(([v, l]) => `<option value="${v}">${l}</option>`).join('')}
-          </select>
-        </label>
         <label class="tt-xf-check"><input type="checkbox" checked data-tt-xf-hide-native> Hide site filters</label>
         <button type="button" data-tt-xf-reset class="tt-xf-reset">Reset</button>
         <button type="button" class="tt-xf-toggle" data-tt-xf-toggle aria-label="Collapse filters" title="Collapse / expand filters">Hide</button>
       </div>
       <div class="tt-xf-body">
+        <div class="tt-xf-row tt-xf-row-sort" data-tt-xf-sort-row>
+          <span class="tt-xf-lbl tt-xf-lbl-inline">Sort by</span>
+          <div class="tt-xf-sort-levels" data-tt-xf-sorts></div>
+          <button type="button" class="tt-xf-sort-add" data-tt-xf-sort-add title="Add a tie-breaker sort">+ Add</button>
+        </div>
         <div class="tt-xf-row">
           ${genres.length > 1 ? `
             <div class="tt-xf-field tt-xf-field-genre">
@@ -601,7 +618,8 @@
       .filter(Boolean);
     const names = splitCsv(q('[data-tt-xf-search]').value);
     const crags = splitCsv(q('[data-tt-xf-crag]')?.value);
-    const sort = q('[data-tt-xf-sort]').value;
+    const sortSelects = panel.querySelectorAll('[data-tt-xf-sort-select]');
+    const sorts = sortSelects.length ? [...sortSelects].map(s => s.value) : [SORT_OPTIONS[0][0]];
     const gminIdx = +q('[data-tt-xf-gmin]').value;
     const gmaxIdx = +q('[data-tt-xf-gmax]').value;
     const gradeMin = gradeTable[gminIdx][0];
@@ -628,7 +646,7 @@
     const done = panel.querySelector('[data-tt-xf-list="done"]')?.dataset.state || 'ignore';
     const hasVideo = panel.querySelector('[data-tt-xf-meta="video"]')?.dataset.state || 'ignore';
     const hasComment = panel.querySelector('[data-tt-xf-meta="comment"]')?.dataset.state || 'ignore';
-    return { names, crags, sort, gradeMin, gradeMax, minRating, minAscents, maxAscents, genres, include, exclude, hideNative, todo, done, hasVideo, hasComment };
+    return { names, crags, sorts, gradeMin, gradeMax, minRating, minAscents, maxAscents, genres, include, exclude, hideNative, todo, done, hasVideo, hasComment };
   }
 
   function matchesFilter(r, s) {
@@ -652,19 +670,23 @@
     return true;
   }
 
-  function compareRoutes(a, b, sort) {
+  function compareRoutes(a, b, sorts) {
     const num = (x) => (typeof x === 'number' ? x : parseFloat(x) || 0);
-    switch (sort) {
-      case 'rating_desc': return num(b.rating) - num(a.rating);
-      case 'rating_asc':  return num(a.rating) - num(b.rating);
-      case 'ascents_desc': return (b.ascents_done_count || 0) - (a.ascents_done_count || 0);
-      case 'ascents_asc':  return (a.ascents_done_count || 0) - (b.ascents_done_count || 0);
-      case 'grade_desc': return (b.grade_int || 0) - (a.grade_int || 0);
-      case 'grade_asc':  return (a.grade_int || 0) - (b.grade_int || 0);
-      case 'name_asc':  return (a.name || '').localeCompare(b.name || '');
-      case 'name_desc': return (b.name || '').localeCompare(a.name || '');
-      default: return 0;
+    for (const sort of sorts) {
+      let c = 0;
+      switch (sort) {
+        case 'rating_desc': c = num(b.rating) - num(a.rating); break;
+        case 'rating_asc':  c = num(a.rating) - num(b.rating); break;
+        case 'ascents_desc': c = (b.ascents_done_count || 0) - (a.ascents_done_count || 0); break;
+        case 'ascents_asc':  c = (a.ascents_done_count || 0) - (b.ascents_done_count || 0); break;
+        case 'grade_desc': c = (b.grade_int || 0) - (a.grade_int || 0); break;
+        case 'grade_asc':  c = (a.grade_int || 0) - (b.grade_int || 0); break;
+        case 'name_asc':  c = (a.name || '').localeCompare(b.name || ''); break;
+        case 'name_desc': c = (b.name || '').localeCompare(a.name || ''); break;
+      }
+      if (c !== 0) return c;
     }
+    return 0;
   }
 
   function findNavBottom() {
@@ -944,14 +966,38 @@
       if (cragDebounce) clearTimeout(cragDebounce);
       cragDebounce = setTimeout(() => { cragDebounce = null; scheduleApply(); }, SEARCH_DEBOUNCE_MS);
     });
-    panel.querySelector('[data-tt-xf-sort]').addEventListener('change', scheduleApply);
+    const sortRow = panel.querySelector('[data-tt-xf-sort-row]');
+    const sortContainerInit = panel.querySelector('[data-tt-xf-sorts]');
+    if (sortContainerInit && !sortContainerInit.children.length) {
+      renderSortLevels(sortContainerInit, [SORT_OPTIONS[0][0]]);
+    }
+    sortRow?.addEventListener('change', (e) => {
+      if (e.target.closest('[data-tt-xf-sort-select]')) scheduleApply();
+    });
+    sortRow?.addEventListener('click', (e) => {
+      const rem = e.target.closest('[data-tt-xf-sort-remove]');
+      if (rem) {
+        const idx = +rem.dataset.idx;
+        const current = [...sortContainerInit.querySelectorAll('[data-tt-xf-sort-select]')].map(s => s.value);
+        current.splice(idx, 1);
+        renderSortLevels(sortContainerInit, current.length ? current : [SORT_OPTIONS[0][0]]);
+        scheduleApply();
+        return;
+      }
+      if (e.target.closest('[data-tt-xf-sort-add]')) {
+        const current = [...sortContainerInit.querySelectorAll('[data-tt-xf-sort-select]')].map(s => s.value);
+        current.push(SORT_OPTIONS[0][0]);
+        renderSortLevels(sortContainerInit, current);
+        scheduleApply();
+      }
+    });
     panel.querySelector('[data-tt-xf-hide-native]').addEventListener('change', scheduleApply);
 
     panel.querySelector('[data-tt-xf-reset]').addEventListener('click', () => {
       panel.querySelector('[data-tt-xf-search]').value = '';
       const cragInput = panel.querySelector('[data-tt-xf-crag]');
       if (cragInput) cragInput.value = '';
-      panel.querySelector('[data-tt-xf-sort]').value = SORT_OPTIONS[0][0];
+      renderSortLevels(sortContainerInit, [SORT_OPTIONS[0][0]]);
       gminEl.value = '0'; gmaxEl.value = String(gradeTable.length - 1);
       syncGrade();
       panel.dataset.minStar = '0'; refreshStars();
@@ -1336,10 +1382,11 @@
           }
           return true;
         });
-        filtered.sort((a, b) => compareRoutes(a, b, state.sort));
+        filtered.sort((a, b) => compareRoutes(a, b, state.sorts));
         // Cheap fingerprint: length + endpoints + sort + first 5 ids.
+        const sortKey = state.sorts.join('>');
         const fp = filtered.length === 0 ? '0' :
-          `${filtered.length}|${state.sort}|${filtered[0].id}|${filtered[filtered.length - 1].id}|${filtered.slice(0, 5).map(r => r.id).join(',')}`;
+          `${filtered.length}|${sortKey}|${filtered[0].id}|${filtered[filtered.length - 1].id}|${filtered.slice(0, 5).map(r => r.id).join(',')}`;
 
         if (fp !== renderedKey) {
           renderedKey = fp;

@@ -47,6 +47,33 @@
 .tt-xf-count { color: #6a7280; font-size: 12px; }
 .tt-xf-meta-progress { color: #2c7dd9; font-size: 12px; font-weight: 500; }
 
+.tt-xf-row-sort { gap: 8px 10px; }
+.tt-xf-sort-levels { display: inline-flex; flex-wrap: wrap; gap: 6px 10px; align-items: center; flex: 1; min-width: 0; }
+.tt-xf-sort-level { display: inline-flex; align-items: center; gap: 4px; }
+.tt-xf-sort-then { color: #6a7280; font-size: 12px; text-transform: lowercase; }
+.tt-xf-sort-remove {
+  width: 18px; height: 18px;
+  border: 1px solid #c4c8ce;
+  background: #f6f7f9;
+  border-radius: 50%;
+  cursor: pointer;
+  font-size: 12px; line-height: 1;
+  color: #5b626b;
+  padding: 0;
+  display: inline-flex; align-items: center; justify-content: center;
+}
+.tt-xf-sort-remove:hover { background: #fbd6d6; border-color: #c46a6a; color: #6d1f1f; }
+.tt-xf-sort-add {
+  padding: 3px 10px;
+  border: 1px solid #c4c8ce;
+  background: #f6f7f9;
+  border-radius: 4px;
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+}
+.tt-xf-sort-add:hover { background: #eceef2; }
+
 .tt-xf-panel input[type="search"],
 .tt-xf-panel input[type="text"],
 .tt-xf-panel select {
