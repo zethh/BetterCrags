@@ -184,27 +184,42 @@
     }
     return mx;
   }
+  async function fetchPage(url, page, signal) {
+    const u = new URL(url, location.origin);
+    if (page > 0) u.searchParams.set('page', String(page));
+    const res = await fetch(u.toString(), { credentials: 'include', signal });
+    if (!res.ok) return null;
+    const text = await res.text();
+    return new DOMParser().parseFromString(text, 'text/html');
+  }
+
+  // Fetch page 0 to discover total page count, then fire pages 1..N in parallel.
   async function fetchRouteKeySet(url, signal) {
     const set = new Set();
     try {
-      for (let page = 0; page < 100; page++) {
-        if (signal && signal.aborted) break;
-        const u = new URL(url, location.origin);
-        if (page > 0) u.searchParams.set('page', String(page));
-        const res = await fetch(u.toString(), { credentials: 'include', signal });
-        if (!res.ok) break;
-        const text = await res.text();
-        const doc = new DOMParser().parseFromString(text, 'text/html');
-        const added = extractRouteKeysInto(doc, set);
-        if (page === 0 && added === 0) return set;
-        if (page > 0 && added === 0) break;
-        const mx = maxPageInPager(doc);
-        if (mx <= page) break;
+      if (signal && signal.aborted) return set;
+      const doc0 = await fetchPage(url, 0, signal);
+      if (!doc0) return set;
+      extractRouteKeysInto(doc0, set);
+      const maxPage = maxPageInPager(doc0);
+      if (maxPage <= 0) return set;
+
+      const tasks = [];
+      for (let p = 1; p <= Math.min(maxPage, 99); p++) {
+        tasks.push(
+          fetchPage(url, p, signal).then(doc => doc && extractRouteKeysInto(doc, set))
+            .catch(err => {
+              if (err && err.name !== 'AbortError' && err.name !== 'TypeError') {
+                warn('fetchRouteKeySet page failed', url, p, err);
+              }
+            })
+        );
       }
+      await Promise.all(tasks);
       return set;
     } catch (err) {
       if (err && err.name === 'AbortError') return set.size ? set : null;
-      warn('fetchRouteKeySet failed', url, err);
+      if (err && err.name !== 'TypeError') warn('fetchRouteKeySet failed', url, err);
       return set.size ? set : null;
     }
   }
@@ -904,7 +919,7 @@
       }
     }
 
-    async function loadUserLists() {
+    function loadUserLists() {
       const user = detectUsername();
       const statusEl = panel.querySelector('[data-tt-xf-lists-status]');
       if (!user) {
@@ -912,18 +927,30 @@
         return;
       }
       if (statusEl) statusEl.textContent = `loading ${user}'s lists…`;
-      const [todo, done] = await Promise.all([
-        fetchRouteKeySet(`/climbers/${encodeURIComponent(user)}/ascents/todo`, userListsAbort.signal),
-        fetchRouteKeySet(`/climbers/${encodeURIComponent(user)}/ascents`, userListsAbort.signal),
-      ]);
-      todoSet = todo;
-      doneSet = done;
-      const t = todo ? todo.size : 0;
-      const d = done ? done.size : 0;
-      if (statusEl) statusEl.textContent = `${t} todo · ${d} done`;
-      log(`user ${user}: ${t} on todo, ${d} done`);
-      renderedKey = '';
-      scheduleApply();
+
+      function updateStatus() {
+        if (!statusEl) return;
+        const t = todoSet ? todoSet.size : '…';
+        const d = doneSet ? doneSet.size : '…';
+        statusEl.textContent = `${t} todo · ${d} done`;
+      }
+      // Each list populates independently — UI becomes usable as soon as either lands.
+      fetchRouteKeySet(`/climbers/${encodeURIComponent(user)}/ascents/todo`, userListsAbort.signal)
+        .then(s => {
+          todoSet = s || new Set();
+          log(`user ${user}: ${todoSet.size} on todo`);
+          updateStatus();
+          renderedKey = '';
+          scheduleApply();
+        });
+      fetchRouteKeySet(`/climbers/${encodeURIComponent(user)}/ascents`, userListsAbort.signal)
+        .then(s => {
+          doneSet = s || new Set();
+          log(`user ${user}: ${doneSet.size} done`);
+          updateStatus();
+          renderedKey = '';
+          scheduleApply();
+        });
     }
     loadUserLists();
 
