@@ -99,7 +99,9 @@
   // Tuning constants.
   const ASC_SLIDER_MAX = 200;   // values >= this are treated as no upper cap
   const FIRST_CHUNK = 30;       // first synchronous batch — keep tiny for fast first paint
-  const RENDER_CHUNK = 200;     // subsequent batches (one per idle/raf tick)
+  const RENDER_CHUNK = 60;      // subsequent batches; small enough that each chunk leaves room for input handlers between ric ticks
+  const DEFAULT_VISIBLE = 200;  // initial pagination window per filter change
+  const VISIBLE_INCREMENT = 200; // rows added per "Show more" click
   const SEARCH_DEBOUNCE_MS = 180;
   const PROMO_SCAN_INTERVAL_MS = 500;
   const ric = (cb) => ('requestIdleCallback' in window)
@@ -1021,6 +1023,8 @@
     let pending = null;
     let lastApply = 0;
     let renderedKey = '';
+    let visibleLimit = DEFAULT_VISIBLE;
+    let lastFilterFp = '';
     let readmoreHidden = false;
     let ourTable = null;
     let ourTbody = null;
@@ -1044,6 +1048,20 @@
     // counter updates (prevents progress drift after filter toggles).
     let metaRunId = 0;
     const metaProgressEl = panel.querySelector('[data-tt-xf-meta-progress]');
+
+    // Batch meta-completion-triggered applies — without this each of 3000+
+    // route fetches calls scheduleApply, causing a full filter+sort pass on
+    // every fetch result. ~400ms batches mean newly-filtered routes fade
+    // out a few times per second instead of continuously thrashing CPU.
+    const META_APPLY_INTERVAL_MS = 400;
+    let metaApplyTimer = null;
+    function scheduleApplyFromMeta() {
+      if (metaApplyTimer) return;
+      metaApplyTimer = setTimeout(() => {
+        metaApplyTimer = null;
+        scheduleApply();
+      }, META_APPLY_INTERVAL_MS);
+    }
 
     function updateMetaProgress() {
       if (!metaProgressEl) return;
@@ -1090,12 +1108,9 @@
             metaCheckDone++;
             updateMetaProgress();
           }
-          // Let apply()'s fingerprint check decide whether to re-render.
-          // Each task flips one route's meta, so if its filter outcome
-          // changes, `filtered.length` shifts and fp differs naturally.
-          // Forcing renderedKey='' here re-rendered 1k rows ~30×/sec
-          // during meta fetch storms and starved click/typing handlers.
-          scheduleApply();
+          // Batched via scheduleApplyFromMeta — routes flip out in ~400ms
+          // bursts during a fetch storm instead of per-completion.
+          scheduleApplyFromMeta();
         });
       }
       if (queued > 0) {
@@ -1202,6 +1217,27 @@
     // keep their DOM node (and image observer state). Only added/removed/moved
     // rows pay DOM cost. First chunk runs sync; the tail streams in via ric so
     // long lists don't block input handlers.
+    function updateMoreButton(remaining) {
+      if (!ourTbody) return;
+      const existing = ourTbody.querySelector('tr[data-tt-xf-more]');
+      if (remaining <= 0) {
+        if (existing) existing.remove();
+        return;
+      }
+      const showN = Math.min(VISIBLE_INCREMENT, remaining);
+      const label = `Show ${showN} more (${remaining} hidden)`;
+      if (!existing) {
+        const tr = document.createElement('tr');
+        tr.dataset.ttXfMore = '1';
+        tr.innerHTML = `<td colspan="99" class="tt-xf-more-cell"><button type="button" class="tt-xf-more-btn" data-tt-xf-more-btn></button></td>`;
+        ourTbody.appendChild(tr);
+        tr.querySelector('[data-tt-xf-more-btn]').textContent = label;
+      } else {
+        if (existing !== ourTbody.lastChild) ourTbody.appendChild(existing);
+        existing.querySelector('[data-tt-xf-more-btn]').textContent = label;
+      }
+    }
+
     function reconcileTbody(filtered) {
       const tbody = ourTbody;
       const have = new Map();
@@ -1319,6 +1355,12 @@
       if (thead) ourTable.appendChild(thead.cloneNode(true));
       ourTbody = document.createElement('tbody');
       ourTable.appendChild(ourTbody);
+      ourTbody.addEventListener('click', (e) => {
+        if (e.target.closest('[data-tt-xf-more-btn]')) {
+          visibleLimit += VISIBLE_INCREMENT;
+          scheduleApply();
+        }
+      });
       nativeTable.insertAdjacentElement('afterend', ourTable);
       nativeTable.dataset.ttXfNativeTable = '1';
       nativeTable.style.setProperty('display', 'none', 'important');
@@ -1383,19 +1425,30 @@
           return true;
         });
         filtered.sort((a, b) => compareRoutes(a, b, state.sorts));
-        // Cheap fingerprint: length + endpoints + sort + first 5 ids.
+        // Two-level fingerprint: filterFp resets pagination when the filter
+        // outcome shifts; renderFp drives whether reconcile runs.
         const sortKey = state.sorts.join('>');
-        const fp = filtered.length === 0 ? '0' :
+        const filterFp = filtered.length === 0 ? '0' :
           `${filtered.length}|${sortKey}|${filtered[0].id}|${filtered[filtered.length - 1].id}|${filtered.slice(0, 5).map(r => r.id).join(',')}`;
+        if (filterFp !== lastFilterFp) {
+          visibleLimit = DEFAULT_VISIBLE;
+          lastFilterFp = filterFp;
+        }
+        const visibleCount = Math.min(visibleLimit, filtered.length);
+        const visible = visibleCount === filtered.length ? filtered : filtered.slice(0, visibleCount);
+        const fp = `${filterFp}|${visibleCount}`;
 
         if (fp !== renderedKey) {
           renderedKey = fp;
           if (cancelRender) { cancelRender(); cancelRender = null; }
-          reconcileTbody(filtered);
+          reconcileTbody(visible);
+          updateMoreButton(filtered.length - visibleCount);
         }
-        if (needMeta) queueMetaForRoutes(filtered); else cancelMetaQueue();
+        if (needMeta) queueMetaForRoutes(visible); else cancelMetaQueue();
 
-        countEl.textContent = ` ${filtered.length}/${routes.length}`;
+        countEl.textContent = visibleCount < filtered.length
+          ? ` ${visibleCount} of ${filtered.length} (${routes.length} total)`
+          : ` ${filtered.length}/${routes.length}`;
         warnEl.hidden = true;
         lastApply = Date.now();
       } catch (err) {
@@ -1407,7 +1460,7 @@
 
     function scheduleApply() {
       if (pending) return;
-      const wait = Math.max(0, 100 - (Date.now() - lastApply));
+      const wait = Math.max(0, 60 - (Date.now() - lastApply));
       pending = setTimeout(() => {
         pending = null;
         // rAF defers apply until just before next paint, which lets any pending
