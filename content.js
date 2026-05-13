@@ -1105,24 +1105,100 @@
       }
     }, { rootMargin: '400px 0px' }) : null;
 
-    // Walk only the newly inserted rows (rows[startIdx..end]) instead of the whole tbody —
-    // avoids quadratic re-scans during chunked render.
-    function observeImgsFromIndex(startIdx) {
-      if (!ourTbody) return;
-      const rows = ourTbody.children;
-      for (let i = startIdx; i < rows.length; i++) {
-        const img = rows[i].querySelector && rows[i].querySelector('img[data-bc-img-id]');
-        if (!img || img.dataset.bcObserved === '1') continue;
-        img.dataset.bcObserved = '1';
-        const id = Number(img.getAttribute('data-bc-img-id'));
-        if (ROUTE_IMG_CACHE.has(id)) {
-          const url = ROUTE_IMG_CACHE.get(id);
-          if (url) img.src = url;
-          continue;
-        }
-        if (imgObserver) imgObserver.observe(img);
-        else queueImage(id, img);
+    function observeRowImg(tr) {
+      const img = tr.querySelector && tr.querySelector('img[data-bc-img-id]');
+      if (!img || img.dataset.bcObserved === '1') return;
+      img.dataset.bcObserved = '1';
+      const id = Number(img.getAttribute('data-bc-img-id'));
+      if (ROUTE_IMG_CACHE.has(id)) {
+        const url = ROUTE_IMG_CACHE.get(id);
+        if (url) img.src = url;
+        return;
       }
+      if (imgObserver) imgObserver.observe(img);
+      else queueImage(id, img);
+    }
+
+    // Used during keyed reconcile to build single rows. tbody is the only
+    // element whose innerHTML setter parses `<tr>` correctly.
+    const _rowFactory = document.createElement('tbody');
+    function buildRowEl(r) {
+      _rowFactory.innerHTML = rowHtml(r, noImageUrl);
+      return _rowFactory.firstElementChild;
+    }
+
+    // Keyed diff between the current tbody and `filtered`. Rows that survive
+    // keep their DOM node (and image observer state). Only added/removed/moved
+    // rows pay DOM cost. First chunk runs sync; the tail streams in via ric so
+    // long lists don't block input handlers.
+    function reconcileTbody(filtered) {
+      const tbody = ourTbody;
+      const have = new Map();
+      for (let i = 0, n = tbody.children.length; i < n; i++) {
+        const tr = tbody.children[i];
+        const id = +tr.dataset.routeId;
+        if (id) have.set(id, tr);
+      }
+      const wantIds = new Set();
+      for (let i = 0, n = filtered.length; i < n; i++) wantIds.add(filtered[i].id);
+
+      for (const [id, tr] of have) {
+        if (!wantIds.has(id)) {
+          tr.remove();
+          have.delete(id);
+        }
+      }
+
+      if (filtered.length === 0) {
+        renderingRows = false;
+        return;
+      }
+
+      function placeRange(start, end) {
+        let prev = start === 0 ? null : have.get(filtered[start - 1].id) || null;
+        for (let i = start; i < end; i++) {
+          const r = filtered[i];
+          let tr = have.get(r.id);
+          if (!tr) {
+            tr = buildRowEl(r);
+            have.set(r.id, tr);
+          }
+          const expected = prev ? prev.nextSibling : tbody.firstChild;
+          if (tr !== expected) tbody.insertBefore(tr, expected);
+          observeRowImg(tr);
+          prev = tr;
+        }
+      }
+
+      let cancelled = false;
+      cancelRender = () => { cancelled = true; renderingRows = false; };
+      renderingRows = true;
+
+      const FIRST = Math.min(FIRST_CHUNK, filtered.length);
+      placeRange(0, FIRST);
+      let cursor = FIRST;
+
+      if (cursor >= filtered.length) {
+        cancelRender = null;
+        renderingRows = false;
+        return;
+      }
+
+      const tick = () => {
+        if (cancelled) return;
+        const end = Math.min(cursor + RENDER_CHUNK, filtered.length);
+        placeRange(cursor, end);
+        cursor = end;
+        countEl.textContent = ` ${cursor}/${filtered.length}…`;
+        if (cursor < filtered.length) {
+          ric(tick);
+        } else {
+          countEl.textContent = ` ${filtered.length}/${routes.length}`;
+          cancelRender = null;
+          renderingRows = false;
+        }
+      };
+      ric(tick);
     }
 
     function loadUserLists() {
@@ -1243,42 +1319,9 @@
         if (fp !== renderedKey) {
           renderedKey = fp;
           if (cancelRender) { cancelRender(); cancelRender = null; }
-          renderingRows = true;
-
-          const FIRST = Math.min(FIRST_CHUNK, filtered.length);
-          let firstHtml = '';
-          for (let i = 0; i < FIRST; i++) firstHtml += rowHtml(filtered[i], noImageUrl);
-          ourTbody.innerHTML = firstHtml;
-          observeImgsFromIndex(0);
-          if (needMeta) queueMetaForRoutes(filtered); else cancelMetaQueue();
-
-          if (filtered.length > FIRST) {
-            let i = FIRST;
-            let cancelled = false;
-            cancelRender = () => { cancelled = true; renderingRows = false; };
-            const tick = () => {
-              if (cancelled) return;
-              const end = Math.min(i + RENDER_CHUNK, filtered.length);
-              let html = '';
-              for (let j = i; j < end; j++) html += rowHtml(filtered[j], noImageUrl);
-              const prevRowCount = ourTbody.childElementCount;
-              ourTbody.insertAdjacentHTML('beforeend', html);
-              observeImgsFromIndex(prevRowCount);
-              i = end;
-              countEl.textContent = ` ${i}/${filtered.length}…`;
-              if (i < filtered.length) {
-                ric(tick);
-              } else {
-                countEl.textContent = ` ${filtered.length}/${routes.length}`;
-                cancelRender = null;
-                renderingRows = false;
-              }
-            };
-            ric(tick);
-          } else {
-            renderingRows = false;
-          }
+          reconcileTbody(filtered);
         }
+        if (needMeta) queueMetaForRoutes(filtered); else cancelMetaQueue();
 
         countEl.textContent = ` ${filtered.length}/${routes.length}`;
         warnEl.hidden = true;
