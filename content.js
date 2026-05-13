@@ -969,6 +969,9 @@
     let metaInFlight = 0;
     let metaCheckTotal = 0;
     let metaCheckDone = 0;
+    // Bumped on cancel so any in-flight tasks queued under a prior run skip
+    // counter updates (prevents progress drift after filter toggles).
+    let metaRunId = 0;
     const metaProgressEl = panel.querySelector('[data-tt-xf-meta-progress]');
 
     function updateMetaProgress() {
@@ -996,6 +999,7 @@
     }
 
     function queueMetaForRoutes(candidates) {
+      const runId = metaRunId;
       let queued = 0;
       for (const r of candidates) {
         if (ROUTE_META_CACHE.has(r.id)) continue;
@@ -1011,8 +1015,10 @@
           } else {
             ROUTE_META_CACHE.delete(r.id);
           }
-          metaCheckDone++;
-          updateMetaProgress();
+          if (runId === metaRunId) {
+            metaCheckDone++;
+            updateMetaProgress();
+          }
           renderedKey = '';
           scheduleApply();
         });
@@ -1025,10 +1031,11 @@
     }
 
     function cancelMetaQueue() {
-      // Drop pending work; in-flight tasks finish and update the cache.
+      // Drop pending work and invalidate in-flight counter updates.
       metaQueue.length = 0;
       metaCheckTotal = 0;
       metaCheckDone = 0;
+      metaRunId++;
       updateMetaProgress();
     }
 
