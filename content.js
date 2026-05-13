@@ -34,32 +34,30 @@
 
   // 27crags-style numeric → climbing label. Source values empirically chosen.
   // Boulder uses Font, sport/trad uses French.
+  // Empirically derived from thetopo's data store (grade_int → displayed label).
+  // Step size is +50 per sub-grade. 6A starts at 400.
   const FONT_GRADES = [
-    [100, '1'], [200, '2'], [300, '3'],
-    [400, '4'], [450, '4+'],
-    [500, '5'], [550, '5+'],
-    [600, '6A'], [625, '6A+'], [650, '6B'], [675, '6B+'],
-    [700, '6C'], [725, '6C+'],
-    [750, '7A'], [775, '7A+'], [800, '7B'], [825, '7B+'],
-    [850, '7C'], [875, '7C+'],
-    [900, '8A'], [925, '8A+'], [950, '8B'], [975, '8B+'],
-    [1000, '8C'], [1025, '8C+'],
-    [1050, '9A'], [1075, '9A+'], [1100, '9B'], [1125, '9B+'],
-    [1150, '9C'], [1175, '9C+'],
+    [100, '3'], [200, '4'], [300, '5'], [350, '5+'],
+    [400, '6A'], [450, '6A+'], [500, '6B'], [550, '6B+'],
+    [600, '6C'], [650, '6C+'],
+    [700, '7A'], [750, '7A+'], [800, '7B'], [850, '7B+'],
+    [900, '7C'], [950, '7C+'],
+    [1000, '8A'], [1050, '8A+'], [1100, '8B'], [1150, '8B+'],
+    [1200, '8C'], [1250, '8C+'],
+    [1300, '9A'], [1350, '9A+'], [1400, '9B'], [1450, '9B+'],
+    [1500, '9C'],
   ];
+  // French (sport) scale, aligned to the same grade_int values.
   const FRENCH_GRADES = [
-    [100, '1'], [200, '2'], [300, '3'],
-    [400, '4a'], [425, '4a+'], [450, '4b'], [475, '4b+'],
-    [500, '4c'], [525, '5a'], [550, '5a+'], [575, '5b'],
-    [600, '5b+'], [625, '5c'], [650, '5c+'],
-    [675, '6a'], [700, '6a+'], [725, '6b'], [750, '6b+'],
-    [775, '6c'], [800, '6c+'],
-    [825, '7a'], [850, '7a+'], [875, '7b'], [900, '7b+'],
-    [925, '7c'], [950, '7c+'],
-    [975, '8a'], [1000, '8a+'], [1025, '8b'], [1050, '8b+'],
-    [1075, '8c'], [1100, '8c+'],
-    [1125, '9a'], [1150, '9a+'], [1175, '9b'], [1200, '9b+'],
-    [1225, '9c'], [1250, '9c+'],
+    [100, '3'], [200, '4a'], [300, '4c'], [350, '5a'],
+    [400, '5c'], [450, '6a'], [500, '6a+'], [550, '6b'],
+    [600, '6b+'], [650, '6c'],
+    [700, '6c+'], [750, '7a'], [800, '7a+'], [850, '7b'],
+    [900, '7b+'], [950, '7c'],
+    [1000, '7c+'], [1050, '8a'], [1100, '8a+'], [1150, '8b'],
+    [1200, '8b+'], [1250, '8c'],
+    [1300, '8c+'], [1350, '9a'], [1400, '9a+'], [1450, '9b'],
+    [1500, '9c'],
   ];
 
   const SORT_OPTIONS = [
@@ -612,6 +610,8 @@
         log(`expanded to ${wider.routes.length} routes (was ${initialCount}) via background fetch`);
         routes = wider.routes;
         ROW_HTML_CACHE.clear();
+        // re-warm cache so the next filter change is instant
+        if (typeof warmRowCache === 'function') warmRowCache();
         // force re-render with new data
         renderedKey = '';
         if (typeof scheduleApply === 'function') scheduleApply();
@@ -1093,7 +1093,12 @@
     function scheduleApply() {
       if (pending) return;
       const wait = Math.max(0, 60 - (Date.now() - lastApply));
-      pending = setTimeout(() => { pending = null; apply(); }, wait);
+      pending = setTimeout(() => {
+        pending = null;
+        // rAF defers apply until just before next paint, which lets any pending
+        // user-action style changes (button colors, slider thumbs) paint first.
+        requestAnimationFrame(apply);
+      }, wait);
     }
 
     // Dual-range slider: drive both inputs entirely via JS pointer events on the wrapper.
@@ -1155,6 +1160,23 @@
     apply();
     setTimeout(apply, 300);
     setTimeout(apply, 1200);
+
+    // Warm the rowHtml cache in the background so the first filter change
+    // doesn't have to pay the per-row build cost.
+    function warmRowCache() {
+      let i = 0;
+      function step(deadline) {
+        const isIdle = deadline && typeof deadline.timeRemaining === 'function';
+        while (i < routes.length && (!isIdle || deadline.timeRemaining() > 2)) {
+          rowHtml(routes[i], noImageUrl);
+          i++;
+          if (!isIdle && i % 200 === 0) break;
+        }
+        if (i < routes.length) ric(step);
+      }
+      ric(step);
+    }
+    warmRowCache();
     // Direct promo sweeps — the section sits outside our MutationObserver scope, so
     // apply() won't fire for it. Hit a few delayed scans on init.
     hidePromos();

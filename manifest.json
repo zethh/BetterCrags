@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "BetterCrags",
-  "version": "0.13.0",
+  "version": "0.13.1",
   "description": "Adds exclude-feature filters, a minimum-ascents filter, and hides premium upsell promos on thetopo.com route lists.",
   "permissions": ["storage"],
   "icons": {
