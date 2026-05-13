@@ -410,7 +410,7 @@
         </label>
         <label class="tt-xf-check"><input type="checkbox" checked data-tt-xf-hide-native> Hide site filters</label>
         <button type="button" data-tt-xf-reset class="tt-xf-reset">Reset</button>
-        <button type="button" class="tt-xf-toggle" data-tt-xf-toggle aria-label="Collapse">–</button>
+        <button type="button" class="tt-xf-toggle" data-tt-xf-toggle aria-label="Collapse filters" title="Collapse / expand filters">Hide</button>
       </div>
       <div class="tt-xf-body">
         <div class="tt-xf-row">
@@ -615,7 +615,7 @@
 
     function setCollapsed(c) {
       panel.classList.toggle('tt-xf-collapsed', c);
-      panel.querySelector('[data-tt-xf-toggle]').textContent = c ? '+' : '–';
+      panel.querySelector('[data-tt-xf-toggle]').textContent = c ? 'Show' : 'Hide';
       setStickyTop(panel);
     }
     panel.querySelector('[data-tt-xf-toggle]').addEventListener('click', e => {
@@ -650,18 +650,28 @@
       }
       setStickyTop(panel);
     }
+    function syncBadge() {
+      try {
+        chrome.runtime.sendMessage({ type: 'BC_STATE', enabled: !panel.classList.contains('tt-xf-off') });
+      } catch (_) {}
+    }
+
     // Listen for toolbar icon clicks (relayed from background.js).
     if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.onMessage) {
       chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         if (msg && msg.type === 'BC_TOGGLE') {
-          const cur = !panel.classList.contains('tt-xf-off');
-          setEnabled(!cur);
+          const wasEnabled = !panel.classList.contains('tt-xf-off');
+          log(`toolbar toggle received: ${wasEnabled ? 'ON→OFF' : 'OFF→ON'}`);
+          setEnabled(!wasEnabled);
           saveState();
-          sendResponse({ ok: true, enabled: !cur });
+          syncBadge();
+          sendResponse({ ok: true, enabled: !wasEnabled });
         }
         return false;
       });
     }
+    // Tell the background the initial state so the badge is correct from the start.
+    syncBadge();
 
     // Save state on any user-driven change in the panel.
     panel.addEventListener('input', saveState);
@@ -874,9 +884,14 @@
       }
     }, { rootMargin: '400px 0px' }) : null;
 
-    function observeNewImages() {
+    // Walk only the newly inserted rows (rows[startIdx..end]) instead of the whole tbody —
+    // avoids quadratic re-scans during chunked render.
+    function observeImgsFromIndex(startIdx) {
       if (!ourTbody) return;
-      for (const img of ourTbody.querySelectorAll('img[data-bc-img-id]:not([data-bc-observed])')) {
+      const rows = ourTbody.children;
+      for (let i = startIdx; i < rows.length; i++) {
+        const img = rows[i].querySelector && rows[i].querySelector('img[data-bc-img-id]');
+        if (!img || img.dataset.bcObserved === '1') continue;
         img.dataset.bcObserved = '1';
         const id = Number(img.getAttribute('data-bc-img-id'));
         if (ROUTE_IMG_CACHE.has(id)) {
@@ -990,7 +1005,7 @@
           let firstHtml = '';
           for (let i = 0; i < FIRST; i++) firstHtml += rowHtml(filtered[i], noImageUrl);
           ourTbody.innerHTML = firstHtml;
-          observeNewImages();
+          observeImgsFromIndex(0);
 
           if (filtered.length > FIRST) {
             let i = FIRST;
@@ -1001,8 +1016,9 @@
               const end = Math.min(i + RENDER_CHUNK, filtered.length);
               let html = '';
               for (let j = i; j < end; j++) html += rowHtml(filtered[j], noImageUrl);
+              const prevRowCount = ourTbody.childElementCount;
               ourTbody.insertAdjacentHTML('beforeend', html);
-              observeNewImages();
+              observeImgsFromIndex(prevRowCount);
               i = end;
               countEl.textContent = ` ${i}/${filtered.length}…`;
               if (i < filtered.length) {

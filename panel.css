@@ -43,7 +43,19 @@
 .tt-xf-power[data-on="1"] { background: #2c7dd9; border-color: #2469bd; color: #fff; }
 .tt-xf-power:hover { filter: brightness(1.05); }
 .tt-xf-panel.tt-xf-off .tt-xf-body { display: none; }
-.tt-xf-panel.tt-xf-off { width: auto; }
+.tt-xf-panel.tt-xf-off .tt-xf-toggle { display: none; }
+.tt-xf-panel.tt-xf-off {
+  background: #f1f1f1;
+  border-color: #c5c5c5;
+  opacity: 0.85;
+}
+.tt-xf-panel.tt-xf-off .tt-xf-title::after {
+  content: ' — off';
+  font-weight: 400;
+  font-size: 12px;
+  color: #888;
+  margin-left: 4px;
+}
 .tt-xf-title { font-weight: 700; font-size: 15px; letter-spacing: -0.01em; }
 .tt-xf-count { color: #6a7280; font-size: 12px; }
 
@@ -65,9 +77,12 @@
   border: 1px solid #c4c8ce;
   background: #f6f7f9;
   border-radius: 4px;
-  width: 26px; height: 26px;
+  height: 26px;
+  padding: 0 10px;
   cursor: pointer;
-  font-size: 16px; line-height: 1;
+  font: 11px/1 inherit;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
   color: #555;
 }
 .tt-xf-toggle:hover { background: #eceef2; }
