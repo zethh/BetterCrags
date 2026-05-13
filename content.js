@@ -85,8 +85,8 @@
 
   // Tuning constants.
   const ASC_SLIDER_MAX = 200;   // values >= this are treated as no upper cap
-  const FIRST_CHUNK = 80;       // first synchronous batch — keep tiny for fast first paint
-  const RENDER_CHUNK = 350;     // subsequent batches (one per idle/raf tick)
+  const FIRST_CHUNK = 30;       // first synchronous batch — keep tiny for fast first paint
+  const RENDER_CHUNK = 200;     // subsequent batches (one per idle/raf tick)
   const SEARCH_DEBOUNCE_MS = 180;
   const PROMO_SCAN_INTERVAL_MS = 500;
   const ric = (cb) => ('requestIdleCallback' in window)
@@ -1292,7 +1292,7 @@
 
     function scheduleApply() {
       if (pending) return;
-      const wait = Math.max(0, 60 - (Date.now() - lastApply));
+      const wait = Math.max(0, 100 - (Date.now() - lastApply));
       pending = setTimeout(() => {
         pending = null;
         // rAF defers apply until just before next paint, which lets any pending
