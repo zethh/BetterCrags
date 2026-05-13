@@ -1,0 +1,38 @@
+# BetterCrags
+
+A personal-use Chrome extension that augments [thetopo.com](https://thetopo.com)'s premium route-list page with the filters it's missing.
+
+## What it does
+
+- **Exclude features** — filter out routes with crimps, slopers, dynos, etc. (tri-state: ignore / must have / exclude)
+- **Ascent range** — min/max ascent count with editable number inputs (0–200+)
+- **Todo / Done** — filter against your own todo list and completed ascents (auto-fetched when you're logged in)
+- **Name search**, sort by rating / ascents / grade / name, dual-thumb grade slider, 3-star min rating
+- **Filters everything client-side** over all 5400+ routes per area — no more clicking "Show more"
+- **Removes the premium upsell** on the page
+- **Filter state persists** across page reloads
+- **Lazy-loads route thumbnails** via thetopo's photo API
+
+Toggle the extension on/off per tab by clicking the BetterCrags icon in your Chrome toolbar.
+
+## Install
+
+1. **Download** this repo as a zip (`Code → Download ZIP`) or `git clone` it. Keep the folder somewhere permanent.
+2. Open `chrome://extensions` in Chrome.
+3. Turn on **Developer mode** (top-right toggle).
+4. Click **Load unpacked** and pick the unzipped/cloned folder.
+5. Visit any thetopo area routelist, e.g. <https://thetopo.com/areas/helsinki/routelist>. The BetterCrags filter bar appears at the top of the list.
+
+## Tips
+
+- Feature pills cycle on click: **white** = ignore, **green** = must have, **red** = must not have
+- Drag the slider thumbs, or type values into the ascent number boxes
+- Login required for the **Todo** / **Done** filters (the extension scans the page for your username automatically)
+- The `–` button at the right collapses the filter body; click again to expand
+- The toolbar icon (top of Chrome) toggles BetterCrags on/off for the active tab
+
+## Caveats
+
+- Personal-use only. Not on the Chrome Web Store.
+- Tied to thetopo's current HTML/API. If they redeploy with significant changes, things might break.
+- The bundled icon is a copy of thetopo's favicon (32×32, upscaled for larger sizes).
