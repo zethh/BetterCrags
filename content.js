@@ -121,6 +121,7 @@
   function captureState(panel) {
     return {
       search: panel.querySelector('[data-tt-xf-search]').value,
+      crag: panel.querySelector('[data-tt-xf-crag]')?.value || '',
       sort: panel.querySelector('[data-tt-xf-sort]').value,
       gminIdx: +panel.querySelector('[data-tt-xf-gmin]').value,
       gmaxIdx: +panel.querySelector('[data-tt-xf-gmax]').value,
@@ -141,6 +142,10 @@
   function applyState(panel, state) {
     if (!state) return;
     if (typeof state.search === 'string') panel.querySelector('[data-tt-xf-search]').value = state.search;
+    if (typeof state.crag === 'string') {
+      const cragEl = panel.querySelector('[data-tt-xf-crag]');
+      if (cragEl) cragEl.value = state.crag;
+    }
     if (state.sort) {
       const sortEl = panel.querySelector('[data-tt-xf-sort]');
       if ([...sortEl.options].some(o => o.value === state.sort)) sortEl.value = state.sort;
@@ -513,7 +518,8 @@
           <span class="tt-xf-count" data-tt-xf-count></span>
           <span class="tt-xf-meta-progress" data-tt-xf-meta-progress hidden></span>
         </div>
-        <input type="search" placeholder="Search by name…" data-tt-xf-search>
+        <input type="search" placeholder="Names (comma-separated)…" data-tt-xf-search>
+        <input type="text" placeholder="Crags (comma-separated)…" data-tt-xf-crag>
         <label class="tt-xf-field">
           <span class="tt-xf-lbl">Sort</span>
           <select data-tt-xf-sort>
@@ -589,7 +595,12 @@
 
   function readFilterState(panel, gradeTable) {
     const q = (sel) => panel.querySelector(sel);
-    const search = q('[data-tt-xf-search]').value.trim().toLowerCase();
+    const splitCsv = (v) => (v || '')
+      .split(',')
+      .map(s => s.trim().toLowerCase())
+      .filter(Boolean);
+    const names = splitCsv(q('[data-tt-xf-search]').value);
+    const crags = splitCsv(q('[data-tt-xf-crag]')?.value);
     const sort = q('[data-tt-xf-sort]').value;
     const gminIdx = +q('[data-tt-xf-gmin]').value;
     const gmaxIdx = +q('[data-tt-xf-gmax]').value;
@@ -617,11 +628,18 @@
     const done = panel.querySelector('[data-tt-xf-list="done"]')?.dataset.state || 'ignore';
     const hasVideo = panel.querySelector('[data-tt-xf-meta="video"]')?.dataset.state || 'ignore';
     const hasComment = panel.querySelector('[data-tt-xf-meta="comment"]')?.dataset.state || 'ignore';
-    return { search, sort, gradeMin, gradeMax, minRating, minAscents, maxAscents, genres, include, exclude, hideNative, todo, done, hasVideo, hasComment };
+    return { names, crags, sort, gradeMin, gradeMax, minRating, minAscents, maxAscents, genres, include, exclude, hideNative, todo, done, hasVideo, hasComment };
   }
 
   function matchesFilter(r, s) {
-    if (s.search && !((r.name || '').toLowerCase().includes(s.search))) return false;
+    if (s.names.length) {
+      const nm = (r.name || '').toLowerCase();
+      if (!s.names.some(n => nm.includes(n))) return false;
+    }
+    if (s.crags.length) {
+      const cn = (r.crag_name || '').toLowerCase();
+      if (!s.crags.some(c => cn.includes(c))) return false;
+    }
     if (s.genres.size && !s.genres.has(r.genre)) return false;
     const g = r.grade_int || 0;
     if (g < s.gradeMin || g > s.gradeMax) return false;
@@ -921,11 +939,18 @@
       if (searchDebounce) clearTimeout(searchDebounce);
       searchDebounce = setTimeout(() => { searchDebounce = null; scheduleApply(); }, SEARCH_DEBOUNCE_MS);
     });
+    let cragDebounce = null;
+    panel.querySelector('[data-tt-xf-crag]')?.addEventListener('input', () => {
+      if (cragDebounce) clearTimeout(cragDebounce);
+      cragDebounce = setTimeout(() => { cragDebounce = null; scheduleApply(); }, SEARCH_DEBOUNCE_MS);
+    });
     panel.querySelector('[data-tt-xf-sort]').addEventListener('change', scheduleApply);
     panel.querySelector('[data-tt-xf-hide-native]').addEventListener('change', scheduleApply);
 
     panel.querySelector('[data-tt-xf-reset]').addEventListener('click', () => {
       panel.querySelector('[data-tt-xf-search]').value = '';
+      const cragInput = panel.querySelector('[data-tt-xf-crag]');
+      if (cragInput) cragInput.value = '';
       panel.querySelector('[data-tt-xf-sort]').value = SORT_OPTIONS[0][0];
       gminEl.value = '0'; gmaxEl.value = String(gradeTable.length - 1);
       syncGrade();
