@@ -262,6 +262,16 @@
 }
 .tt-xf-reset:hover { background: #eceef2; }
 
+/* Give our table its own compositing layer — keeps scrolling smooth while
+   images stream in and the browser repaints individual rows. */
+table.tt-xf-our-table {
+  contain: layout style;
+  will-change: transform;
+}
+table.tt-xf-our-table tr {
+  contain: layout style;
+}
+
 .tt-xf-warn {
   margin-top: 6px;
   padding: 4px 8px;

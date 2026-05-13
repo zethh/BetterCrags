@@ -78,8 +78,13 @@
 
   // Tuning constants.
   const ASC_SLIDER_MAX = 200;   // values >= this are treated as no upper cap
-  const RENDER_CHUNK = 300;     // rows per animation frame after the first
+  const FIRST_CHUNK = 80;       // first synchronous batch — keep tiny for fast first paint
+  const RENDER_CHUNK = 350;     // subsequent batches (one per idle/raf tick)
+  const SEARCH_DEBOUNCE_MS = 180;
   const PROMO_SCAN_INTERVAL_MS = 500;
+  const ric = (cb) => ('requestIdleCallback' in window)
+    ? requestIdleCallback(cb, { timeout: 250 })
+    : requestAnimationFrame(cb);
   const PLACEHOLDER_IMG = 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
 
   const STATE_KEY = 'bc_filter_state_v1';
@@ -286,7 +291,13 @@
       ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   }
 
+  // Cache built HTML strings per route. Filter changes re-use; only invalidated
+  // when the routes array itself is replaced (background-fetch expansion).
+  const ROW_HTML_CACHE = new Map(); // routeId -> htmlString
+
   function rowHtml(route, noImageUrl) {
+    const cached = ROW_HTML_CACHE.get(route.id);
+    if (cached) return cached;
     const tagsHtml = TAGS
       .filter(([k]) => route[k])
       .map(([k, l]) => `<span class="tag ${k} show-tooltip" title="" data-original-title="${escapeHtml(l)}"><i class="icon icon27 icon-${k}"></i></span>`)
@@ -305,7 +316,7 @@
     const genre = escapeHtml(route.genre || '');
     const ascents = route.ascents_done_count || 0;
     const rid = escapeHtml(String(route.id));
-    return `<tr role="row" data-tt-xf-own="1" data-route-id="${rid}">
+    const html = `<tr role="row" data-tt-xf-own="1" data-route-id="${rid}">
       <td><a href="${routeHref}"><div class="hidden">${name}</div><div class="tiny-topo-image"><img src="${escapeHtml(noImageUrl)}" data-bc-img-id="${rid}" alt="" loading="lazy"></div><div class="route-block"><div class="flex-container"><div class="route-block__name_container"><div class="route-block__name">${name}<div class="visible-xs-inline-block">, ${escapeHtml(grade)} <span class="stars star-span">${starsHtml}</span></div></div><div class="visible-xs-block route-block__description"><p class="route-details">${genre} at ${cragName}</p></div></div><div class="route-block__properties"><div class="visible-xs-inline-block route-property"><div class="tags visible-xs-inline-block">${tagsHtml}</div></div></div></div></div></a></td>
       <td class="hidden-xs">${escapeHtml(grade)}</td>
       <td class="hidden-xs">${genre}</td>
@@ -314,6 +325,8 @@
       <td class="hidden-xs"><span class="stars star-span">${starsHtml}</span></td>
       <td class="hidden-xs"><a class="lfont" href="${cragHref}">${cragName}</a></td>
     </tr>`;
+    ROW_HTML_CACHE.set(route.id, html);
+    return html;
   }
 
 
@@ -598,6 +611,7 @@
         if (wider.routes.length <= initialCount) return;
         log(`expanded to ${wider.routes.length} routes (was ${initialCount}) via background fetch`);
         routes = wider.routes;
+        ROW_HTML_CACHE.clear();
         // force re-render with new data
         renderedKey = '';
         if (typeof scheduleApply === 'function') scheduleApply();
@@ -797,7 +811,11 @@
     ascMaxNum.addEventListener('input', applyNumToSliders);
     syncAsc();
 
-    panel.querySelector('[data-tt-xf-search]').addEventListener('input', scheduleApply);
+    let searchDebounce = null;
+    panel.querySelector('[data-tt-xf-search]').addEventListener('input', () => {
+      if (searchDebounce) clearTimeout(searchDebounce);
+      searchDebounce = setTimeout(() => { searchDebounce = null; scheduleApply(); }, SEARCH_DEBOUNCE_MS);
+    });
     panel.querySelector('[data-tt-xf-sort]').addEventListener('change', scheduleApply);
     panel.querySelector('[data-tt-xf-hide-native]').addEventListener('change', scheduleApply);
 
@@ -1028,7 +1046,7 @@
           if (cancelRender) { cancelRender(); cancelRender = null; }
           renderingRows = true;
 
-          const FIRST = Math.min(RENDER_CHUNK, filtered.length);
+          const FIRST = Math.min(FIRST_CHUNK, filtered.length);
           let firstHtml = '';
           for (let i = 0; i < FIRST; i++) firstHtml += rowHtml(filtered[i], noImageUrl);
           ourTbody.innerHTML = firstHtml;
@@ -1049,14 +1067,14 @@
               i = end;
               countEl.textContent = ` ${i}/${filtered.length}…`;
               if (i < filtered.length) {
-                requestAnimationFrame(tick);
+                ric(tick);
               } else {
                 countEl.textContent = ` ${filtered.length}/${routes.length}`;
                 cancelRender = null;
                 renderingRows = false;
               }
             };
-            requestAnimationFrame(tick);
+            ric(tick);
           } else {
             renderingRows = false;
           }
