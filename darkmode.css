@@ -435,3 +435,45 @@ html.bettercrags-dark .slider-fragment {
 html.bettercrags-dark .slider-fragment-label {
   color: var(--bc-text);
 }
+
+/* Row "+ todo" / "+ done" action buttons + add-ascent modal */
+html.bettercrags-dark .tt-xf-row-act {
+  background: var(--bc-bg-elev-2);
+  border-color: var(--bc-border-strong);
+  color: var(--bc-text);
+}
+html.bettercrags-dark .tt-xf-row-act:hover {
+  background: var(--bc-bg-elev-3);
+}
+html.bettercrags-dark .tt-xf-row-act[data-bc-act="todo"]:hover {
+  background: #244524;
+  border-color: #4d7d4d;
+  color: #cfeccf;
+}
+html.bettercrags-dark .tt-xf-row-act[data-bc-act="done"]:hover {
+  background: #1f3b56;
+  border-color: #4f7aa3;
+  color: #cfe3f5;
+}
+html.bettercrags-dark .tt-xf-modal {
+  background: var(--bc-bg-elev) !important;
+  color: var(--bc-text);
+  border-color: var(--bc-border-strong);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.6);
+}
+html.bettercrags-dark .tt-xf-modal-header {
+  border-bottom-color: var(--bc-border) !important;
+}
+html.bettercrags-dark .tt-xf-modal-title { color: var(--bc-text-strong); }
+html.bettercrags-dark .tt-xf-modal-close { color: var(--bc-text-muted); }
+html.bettercrags-dark .tt-xf-modal-close:hover { color: var(--bc-text-strong); }
+html.bettercrags-dark .tt-xf-modal-status {
+  background: var(--bc-bg-elev-2);
+  border-color: var(--bc-border);
+  color: var(--bc-text);
+}
+html.bettercrags-dark .tt-xf-modal-error {
+  background: #4a1f1f;
+  border-color: #8a3838;
+  color: #f0c8c8;
+}

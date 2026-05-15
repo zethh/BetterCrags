@@ -313,3 +313,82 @@ table.tt-xf-our-table tr {
   font-size: 13px;
 }
 .tt-xf-more-btn:hover { background: #eceef2; }
+
+/* Row "+ todo" / "+ done" action buttons */
+.tt-xf-row-actions-cell {
+  white-space: nowrap;
+  text-align: right;
+  vertical-align: middle;
+  padding: 6px 8px !important;
+}
+.tt-xf-row-act {
+  display: inline-block;
+  padding: 3px 8px;
+  margin: 1px 0 1px 4px;
+  border: 1px solid #c4c8ce;
+  border-radius: 10px;
+  background: #ffffff;
+  color: #1d2228;
+  font: 11px/1.2 inherit;
+  cursor: pointer;
+  user-select: none;
+}
+.tt-xf-row-act:hover { background: #eceef2; border-color: #a8adb5; }
+.tt-xf-row-act[data-bc-act="todo"]:hover { background: #d6f0d6; border-color: #6abf6a; color: #1f5d1f; }
+.tt-xf-row-act[data-bc-act="done"]:hover { background: #d6e4f5; border-color: #6a9bc4; color: #1f3d5d; }
+
+/* Add-ascent modal */
+.tt-xf-modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(15, 20, 26, 0.55);
+  z-index: 2147483000;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 6vh 16px 16px;
+  overflow-y: auto;
+}
+.tt-xf-modal {
+  background: #ffffff;
+  color: #1d2228;
+  border: 1px solid #c4c8ce;
+  border-radius: 6px;
+  width: min(560px, 100%);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.25);
+  font: 13px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+}
+.tt-xf-modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px;
+  border-bottom: 1px solid #e6e8ec;
+}
+.tt-xf-modal-title { font-weight: 600; font-size: 14px; }
+.tt-xf-modal-close {
+  background: transparent;
+  border: 0;
+  font-size: 22px;
+  line-height: 1;
+  color: #5b626b;
+  cursor: pointer;
+  padding: 0 4px;
+}
+.tt-xf-modal-close:hover { color: #1d2228; }
+.tt-xf-modal-body { padding: 14px; }
+.tt-xf-modal-body form { display: block; }
+.tt-xf-modal-status {
+  margin-top: 10px;
+  padding: 8px 10px;
+  background: #f6f7f9;
+  border: 1px solid #d0d4da;
+  border-radius: 4px;
+  font-size: 12px;
+  color: #1d2228;
+}
+.tt-xf-modal-error {
+  background: #fbd6d6;
+  border-color: #c46a6a;
+  color: #6d1f1f;
+}
