@@ -425,6 +425,44 @@
     }
   }
 
+  // Crag routelist pages (/crags/<slug>/routelist) use a server-rendered
+  // template with none of the rich fields the filters need — no embedded
+  // RouteList JSON, no feature-tag markup, no numeric route ids. The parent
+  // area's routelist (/areas/<area>/routelist) does embed a full JSON store
+  // with every route in the area. So when we're on a crag page we derive the
+  // area from the on-page link, fetch the area's store, and filter to just
+  // this crag's routes.
+  function detectCragRoutelistContext() {
+    const m = location.pathname.match(/^\/crags\/([^/]+)\/routelist\/?$/);
+    if (!m) return null;
+    const crag_param_id = decodeURIComponent(m[1]);
+    const areaLink = document.querySelector('.area-container a[href^="/areas/"]')
+      || document.querySelector('a[href^="/areas/"]');
+    const href = (areaLink && areaLink.getAttribute('href')) || '';
+    const am = href.match(/^\/areas\/([^/?#]+)/);
+    return { crag_param_id, area_param_id: am ? decodeURIComponent(am[1]) : null };
+  }
+  async function fetchAreaStore(areaParamId) {
+    try {
+      const u = new URL(`/areas/${encodeURIComponent(areaParamId)}/routelist`, location.origin);
+      u.searchParams.set('grade_min', '100');
+      u.searchParams.set('grade_max', '1500');
+      for (const g of ['Boulder', 'Sport', 'Traditional', 'DWS', 'Other']) {
+        u.searchParams.set(g, '1');
+      }
+      const res = await fetch(u.toString(), { credentials: 'include', headers: { 'Accept': 'text/html' } });
+      if (!res.ok) { warn('area fetch failed', res.status, areaParamId); return null; }
+      const text = await res.text();
+      const doc = new DOMParser().parseFromString(text, 'text/html');
+      const tag = doc.querySelector('script[data-component-name="RouteList"]');
+      if (!tag) { warn('area fetch had no RouteList store', areaParamId); return null; }
+      return JSON.parse(tag.textContent);
+    } catch (err) {
+      warn('area fetch threw', areaParamId, err);
+      return null;
+    }
+  }
+
   function gradeLabelFor(gi, genre) {
     const table = genre === 'Boulder' ? FONT_GRADES : FRENCH_GRADES;
     let best = String(gi), bestD = Infinity;
@@ -614,7 +652,7 @@
   // when the routes array itself is replaced (background-fetch expansion).
   // Bump when the row template's cell count or structure changes so stale
   // cached HTML from older builds doesn't survive into a new column layout.
-  const ROW_HTML_VERSION = 'v2';
+  const ROW_HTML_VERSION = 'v3';
   const ROW_HTML_CACHE = new Map(); // `${version}:${routeId}` -> htmlString
 
   function rowHtml(route, noImageUrl) {
@@ -639,6 +677,7 @@
     const genre = escapeHtml(route.genre || '');
     const ascents = route.ascents_done_count || 0;
     const rid = escapeHtml(String(route.id));
+    const routeKey = escapeHtml(`${route.crag_param_id || ''}/${route.param_id || ''}`);
     const html = `<tr role="row" data-tt-xf-own="1" data-route-id="${rid}">
       <td><a href="${routeHref}"><div class="hidden">${name}</div><div class="tiny-topo-image"><img src="${escapeHtml(noImageUrl)}" data-bc-img-id="${rid}" alt="" loading="lazy"></div><div class="route-block"><div class="flex-container"><div class="route-block__name_container"><div class="route-block__name">${name}<div class="visible-xs-inline-block">, ${escapeHtml(grade)} <span class="stars star-span">${starsHtml}</span></div></div><div class="visible-xs-block route-block__description"><p class="route-details">${genre} at ${cragName}</p></div></div><div class="route-block__properties"><div class="visible-xs-inline-block route-property"><div class="tags visible-xs-inline-block">${tagsHtml}</div></div></div></div></div></a></td>
       <td class="hidden-xs">${escapeHtml(grade)}</td>
@@ -647,7 +686,7 @@
       <td class="hidden-xs"><div class="tags">${tagsHtml}</div></td>
       <td class="hidden-xs"><span class="stars star-span">${starsHtml}</span></td>
       <td class="hidden-xs"><a class="lfont" href="${cragHref}">${cragName}</a></td>
-      <td class="hidden-xs tt-xf-row-actions-cell"><button type="button" class="tt-xf-row-act" data-bc-act="todo" data-bc-route-id="${rid}" title="Add to my todo list">+ todo</button><button type="button" class="tt-xf-row-act" data-bc-act="done" data-bc-route-id="${rid}" title="Log as done">+ done</button></td>
+      <td class="hidden-xs tt-xf-row-actions-cell"><button type="button" class="tt-xf-row-act" data-bc-act="todo" data-bc-route-id="${rid}" data-bc-route-key="${routeKey}" title="Add to my todo list">+ todo</button><button type="button" class="tt-xf-row-act" data-bc-act="done" data-bc-route-id="${rid}" data-bc-route-key="${routeKey}" title="Log as done">+ done</button></td>
     </tr>`;
     ROW_HTML_CACHE.set(cacheKey, html);
     return html;
@@ -940,8 +979,35 @@
     panel.style.top = findNavBottom() + 'px';
   }
 
-  function init() {
-    const store = readEmbeddedStore();
+  async function init() {
+    let store = readEmbeddedStore();
+    let cragCtx = null;
+    let allAreaRoutes = null; // full area route list when we fetched via crag fallback
+
+    // No embedded store usually means we're on a crag routelist (different
+    // template). Derive routes by fetching the parent area's store.
+    if (!store || !Array.isArray(store.routes) || !store.routes.length) {
+      cragCtx = detectCragRoutelistContext();
+      if (cragCtx) {
+        if (!cragCtx.area_param_id) {
+          warn(`crag routelist "${cragCtx.crag_param_id}": no parent area link on page`);
+          return;
+        }
+        log(`crag routelist: fetching parent area "${cragCtx.area_param_id}" for full route data…`);
+        const areaStore = await fetchAreaStore(cragCtx.area_param_id);
+        if (areaStore && Array.isArray(areaStore.routes)) {
+          const matched = areaStore.routes.filter(r => r.crag_param_id === cragCtx.crag_param_id);
+          if (matched.length) {
+            allAreaRoutes = areaStore.routes;
+            store = { ...areaStore, routes: matched };
+            log(`derived ${matched.length} routes for crag "${cragCtx.crag_param_id}" (out of ${areaStore.routes.length} in area)`);
+          } else {
+            warn(`no routes matched crag "${cragCtx.crag_param_id}" in area "${cragCtx.area_param_id}"`);
+          }
+        }
+      }
+    }
+
     let routes = store && Array.isArray(store.routes) ? store.routes : [];
     if (!routes.length) { warn('no routes found in embedded store'); return; }
     const noImageUrl = (store && store.noImageUrl) || PLACEHOLDER_IMG;
@@ -950,13 +1016,15 @@
     const gradeTable = pickGradeTable(routes);
     const panel = createPanel(routes, gradeTable);
     attachPanel(panel);
-    persistCragTotals(harvestCragTotals(routes));
+    // Harvest the full area when we have it — sibling crags get free updates.
+    persistCragTotals(harvestCragTotals(allAreaRoutes || routes));
 
     // If the URL has narrowing filters, fetch a wider dataset in the background.
+    // Skip on crag routelist — we already fetched the full area.
     const urlParams = new URL(location.href).searchParams;
     const gMin = +urlParams.get('grade_min') || 100;
     const gMax = +urlParams.get('grade_max') || 1500;
-    const needsWider = gMin > 100 || gMax < 1500 || urlParams.has('rating');
+    const needsWider = !cragCtx && (gMin > 100 || gMax < 1500 || urlParams.has('rating'));
     if (needsWider) {
       const initialCount = routes.length;
       fetchUnrestrictedRoutes().then(wider => {
@@ -1461,6 +1529,35 @@
       }
     }
 
+    // Reflect whether a route is already on the user's todo / done list on the
+    // row's quick-action buttons. Called for every placed row in reconcileTbody,
+    // so both freshly-built and reused rows pick up state changes (e.g. after
+    // loadUserLists resolves or a successful add-ascent submit).
+    function applyRowActionStates(tr) {
+      if (!tr) return;
+      const todoBtn = tr.querySelector('[data-bc-act="todo"]');
+      const doneBtn = tr.querySelector('[data-bc-act="done"]');
+      const anyBtn = todoBtn || doneBtn;
+      if (!anyBtn) return;
+      const key = anyBtn.dataset.bcRouteKey || '';
+      const onTodo = !!(todoSet && key && todoSet.has(key));
+      const isDone = !!(doneSet && key && doneSet.has(key));
+      if (todoBtn) {
+        todoBtn.classList.toggle('is-on', onTodo);
+        todoBtn.textContent = onTodo ? '✓ todo' : '+ todo';
+        todoBtn.title = onTodo
+          ? 'Already on your todo list — click to add another ascent entry'
+          : 'Add to my todo list';
+      }
+      if (doneBtn) {
+        doneBtn.classList.toggle('is-on', isDone);
+        doneBtn.textContent = isDone ? '✓ done' : '+ done';
+        doneBtn.title = isDone
+          ? 'Already logged as done — click to log another ascent'
+          : 'Log as done';
+      }
+    }
+
     function reconcileTbody(filtered) {
       const tbody = ourTbody;
       const have = new Map();
@@ -1496,6 +1593,7 @@
           const expected = prev ? prev.nextSibling : tbody.firstChild;
           if (tr !== expected) tbody.insertBefore(tr, expected);
           observeRowImg(tr);
+          applyRowActionStates(tr);
           prev = tr;
         }
       }

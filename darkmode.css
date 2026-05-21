@@ -455,6 +455,16 @@ html.bettercrags-dark .tt-xf-row-act[data-bc-act="done"]:hover {
   border-color: #4f7aa3;
   color: #cfe3f5;
 }
+html.bettercrags-dark .tt-xf-row-act[data-bc-act="todo"].is-on {
+  background: #244524;
+  border-color: #4d7d4d;
+  color: #cfeccf;
+}
+html.bettercrags-dark .tt-xf-row-act[data-bc-act="done"].is-on {
+  background: #1f3b56;
+  border-color: #4f7aa3;
+  color: #cfe3f5;
+}
 html.bettercrags-dark .tt-xf-modal {
   background: var(--bc-bg-elev) !important;
   color: var(--bc-text);

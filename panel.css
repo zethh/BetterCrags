@@ -336,6 +336,9 @@ table.tt-xf-our-table tr {
 .tt-xf-row-act:hover { background: #eceef2; border-color: #a8adb5; }
 .tt-xf-row-act[data-bc-act="todo"]:hover { background: #d6f0d6; border-color: #6abf6a; color: #1f5d1f; }
 .tt-xf-row-act[data-bc-act="done"]:hover { background: #d6e4f5; border-color: #6a9bc4; color: #1f3d5d; }
+.tt-xf-row-act.is-on { font-weight: 600; }
+.tt-xf-row-act[data-bc-act="todo"].is-on { background: #d6f0d6; border-color: #6abf6a; color: #1f5d1f; }
+.tt-xf-row-act[data-bc-act="done"].is-on { background: #d6e4f5; border-color: #6a9bc4; color: #1f3d5d; }
 
 /* Add-ascent modal */
 .tt-xf-modal-overlay {

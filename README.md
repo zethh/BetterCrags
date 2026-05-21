@@ -10,6 +10,7 @@ A personal-use Chrome extension that augments [thetopo.com](https://thetopo.com)
 - **My Crags dashboard** — a standalone page (button in the filter panel) with: where-to-go-next ranking by open todos, per-crag completion % across all your visited areas, grade firsts (the crag where each grade became real for you), and assorted fun stats
 - **Name search**, sort by rating / ascents / grade / name, dual-thumb grade slider, 3-star min rating
 - **Filters everything client-side** over all 5400+ routes per area — no more clicking "Show more"
+- **Works on a single crag's routelist too** — derives full feature/tag data from the parent area so every filter still applies
 - **Removes the premium upsell** on the page
 - **Filter state persists** across page reloads
 - **Lazy-loads route thumbnails** via thetopo's photo API
@@ -22,7 +23,7 @@ Toggle the extension on/off per tab by clicking the BetterCrags icon in your Chr
 2. Open `chrome://extensions` in Chrome.
 3. Turn on **Developer mode** (top-right toggle).
 4. Click **Load unpacked** and pick the unzipped/cloned folder.
-5. Visit any thetopo area routelist, e.g. <https://thetopo.com/areas/helsinki/routelist>. The BetterCrags filter bar appears at the top of the list.
+5. Visit any thetopo area routelist (e.g. <https://thetopo.com/areas/helsinki/routelist>) or a specific crag's routelist (e.g. <https://thetopo.com/crags/hienostoalue/routelist>). The BetterCrags filter bar appears at the top of the list.
 
 ## Tips
 
