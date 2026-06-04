@@ -174,6 +174,29 @@ a:hover { color: #8fc7ff; text-decoration: underline; }
   border-bottom-color: var(--accent);
 }
 
+/* Area filter for "Where to go next" — wrapping rounded chips. */
+.mc-area-tabs {
+  display: flex; flex-wrap: wrap; gap: 6px;
+  padding: 10px 16px 0;
+}
+.mc-area-tabs:empty { display: none; }
+.mc-area-tabs button {
+  background: var(--bg-elev-2);
+  color: var(--text-muted);
+  border: 1px solid var(--border-strong);
+  border-radius: 12px;
+  padding: 3px 10px;
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+}
+.mc-area-tabs button:hover { color: var(--text); background: var(--bg-elev-3); }
+.mc-area-tabs button[data-active="1"] {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
 .mc-next-list {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
@@ -189,6 +212,14 @@ a:hover { color: #8fc7ff; text-decoration: underline; }
 }
 .mc-next-item .n {
   font-weight: 600; color: var(--text-strong); font-size: 14px;
+  display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap;
+}
+.mc-next-item .n .area {
+  font-weight: 400;
+  font-size: 11px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
 }
 .mc-next-item .m {
   font-size: 12px; color: var(--text-muted);

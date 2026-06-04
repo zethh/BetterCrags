@@ -7,7 +7,7 @@
   const USERNAME_KEY = 'bc_username_v1';
   const CRAG_TOTALS_KEY = 'bc_crag_totals_v1';
   const ASCENTS_CACHE_KEY = 'bc_mycrags_ascents_v1';
-  const CRAG_FETCH_CACHE_KEY = 'bc_mycrags_crag_fetched_v1';
+  const CRAG_FETCH_CACHE_KEY = 'bc_mycrags_crag_fetched_v2'; // v2: also backfills crag area
   const CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 1 day for ascents (cheap to refetch)
   const CRAG_PAGE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
@@ -279,12 +279,25 @@
     return dedupeKeepEarliest(rows);
   }
 
+  // The crag page shows "Area, Country" as a link in .area-container (e.g.
+  // "Åland, Finland"). Split it into { area, country } so we can group crags
+  // by region in "Where to go next".
+  function parseCragLocation(doc) {
+    const a = doc.querySelector('.area-container a');
+    const txt = a ? (a.textContent || '').trim() : '';
+    if (!txt) return { area: '', country: '' };
+    const i = txt.lastIndexOf(',');
+    if (i === -1) return { area: txt, country: '' };
+    return { area: txt.slice(0, i).trim(), country: txt.slice(i + 1).trim() };
+  }
+
   // Fetch a single crag page and try to derive total route counts + grade
   // histogram. Best-effort: tries embedded RouteList JSON first, then falls
   // back to counting unique route links on the page.
   async function fetchCragTotal(cragId) {
     try {
       const doc = await fetchHtml(`/crags/${encodeURIComponent(cragId)}`);
+      const loc = parseCragLocation(doc);
       const tag = doc.querySelector('script[data-component-name="RouteList"]');
       if (tag) {
         try {
@@ -300,7 +313,7 @@
               if (gi) byGrade[gi] = (byGrade[gi] || 0) + 1;
               if (!name) name = r.crag_name || '';
             }
-            return { name, total: store.routes.length, byGenre, byGrade };
+            return { name, total: store.routes.length, byGenre, byGrade, ...loc };
           }
         } catch {}
       }
@@ -312,7 +325,7 @@
       }
       const nameEl = doc.querySelector('h1, .crag-title, .crag-header h1');
       const name = nameEl ? (nameEl.textContent || '').trim() : '';
-      return { name, total: seen.size, byGenre: {}, byGrade: {} };
+      return { name, total: seen.size, byGenre: {}, byGrade: {}, ...loc };
     } catch {
       return null;
     }
@@ -326,6 +339,7 @@
     cragTotals: {},   // cragId → { name, total, byGenre, byGrade, t }
     cragsAggregated: new Map(), // cragId → aggregated stats
     activeGenreNext: 'all',
+    activeAreaNext: 'all',
     activeGenreCrags: 'all',
     cragSort: { col: 'todo', dir: 'desc' },
     activeYear: null,     // 'all' or 'YYYY'
@@ -373,6 +387,8 @@
           done: [],
           todo: [],
           total: null,
+          area: '',
+          country: '',
           totalsByGenre: {},
           totalsByGrade: {},
           firsts: {}, // `${genre}:${gi}` → { date, routeName } for the earliest send of that grade
@@ -396,6 +412,8 @@
       if (totals && totals.byGenre) c.totalsByGenre = totals.byGenre;
       if (totals && totals.byGrade) c.totalsByGrade = totals.byGrade;
       if (totals && totals.name && !c.name) c.name = totals.name;
+      if (totals && totals.area) c.area = totals.area;
+      if (totals && totals.country) c.country = totals.country;
     }
 
     // Compute global "first at grade" per genre across all done routes.
@@ -510,24 +528,64 @@
   // Score = (open todos in genre) * (1 + ln(1 + done_at_crag_in_genre)) — favours
   // crags where you have an active project list AND some history, but doesn't
   // ignore brand-new wishlists.
+  const UNKNOWN_AREA = '__unknown__';
+
+  // Render the area-filter chips for "Where to go next". Areas are derived from
+  // the crags that have open todos in the current genre, so the list only ever
+  // offers places you could actually go. Crags whose area we haven't fetched
+  // yet fall under an "Unknown" chip.
+  function renderAreaTabs(genreItems) {
+    const container = $('#mc-next-areas');
+    const counts = new Map(); // areaKey → { label, count }
+    for (const { c } of genreItems) {
+      const key = c.area || UNKNOWN_AREA;
+      const label = c.area || 'Unknown';
+      const entry = counts.get(key) || { label, count: 0 };
+      entry.count++;
+      counts.set(key, entry);
+    }
+    // Reset a stale selection (e.g. switching genre dropped the chosen area).
+    if (state.activeAreaNext !== 'all' && !counts.has(state.activeAreaNext)) {
+      state.activeAreaNext = 'all';
+    }
+    container.innerHTML = '';
+    // Only worth showing the filter when there's more than one area in play.
+    if (counts.size <= 1) return;
+    const ordered = [...counts.entries()].sort((a, b) =>
+      b[1].count - a[1].count || a[1].label.localeCompare(b[1].label));
+    const make = (key, label) => {
+      const btn = document.createElement('button');
+      btn.textContent = label;
+      if (key === state.activeAreaNext) btn.dataset.active = '1';
+      btn.addEventListener('click', () => { state.activeAreaNext = key; renderNext(); });
+      container.appendChild(btn);
+    };
+    make('all', 'All areas');
+    for (const [key, { label, count }] of ordered) make(key, `${label} (${count})`);
+  }
+
   function renderNext() {
     const card = $('#mc-next-card');
     const list = $('#mc-next-list');
     const genre = state.activeGenreNext;
     renderTabs($('#mc-next-tabs'), genre, (g) => { state.activeGenreNext = g; renderNext(); });
-    const items = [];
+    const genreItems = [];
     for (const c of state.cragsAggregated.values()) {
       const todos = c.todo.filter(r => genre === 'all' || r.genre === genre);
       if (!todos.length) continue;
       const doneAtCrag = c.done.filter(r => genre === 'all' || r.genre === genre).length;
       const hardestTodoGi = todos.reduce((mx, r) => Math.max(mx, r.gradeInt || 0), 0);
       const score = todos.length * (1 + Math.log1p(doneAtCrag));
-      items.push({ c, todos, doneAtCrag, hardestTodoGi, score });
+      genreItems.push({ c, todos, doneAtCrag, hardestTodoGi, score });
     }
+    renderAreaTabs(genreItems);
+    const area = state.activeAreaNext;
+    const items = genreItems.filter(({ c }) =>
+      area === 'all' || (c.area || UNKNOWN_AREA) === area);
     items.sort((a, b) => b.score - a.score);
     const top = items.slice(0, 8);
     if (!top.length) {
-      list.innerHTML = `<div class="mc-card-sub" style="padding:14px 16px;">No open todos in this genre yet.</div>`;
+      list.innerHTML = `<div class="mc-card-sub" style="padding:14px 16px;">No open todos ${area === 'all' ? 'in this genre' : 'in this area'} yet.</div>`;
       card.hidden = false;
       return;
     }
@@ -540,7 +598,7 @@
         : '';
       return `
         <div class="mc-next-item">
-          <div class="n"><a href="https://thetopo.com/crags/${escapeHtml(c.id)}" target="_blank" rel="noopener">${escapeHtml(name)}</a></div>
+          <div class="n"><a href="https://thetopo.com/crags/${escapeHtml(c.id)}" target="_blank" rel="noopener">${escapeHtml(name)}</a>${c.area ? `<span class="area">${escapeHtml(c.area)}</span>` : ''}</div>
           <div class="b">
             <span class="pill">${todos.length} todo</span>
             <span class="pill">${doneAtCrag} done${totalKnown ? ` / ${c.total}` : ''}</span>
@@ -1155,7 +1213,10 @@
   async function fillMissingCragTotals() {
     const missing = [];
     for (const c of state.cragsAggregated.values()) {
-      if (c.total == null || c.total <= 0) missing.push(c.id);
+      const totals = state.cragTotals[c.id];
+      const needTotal = c.total == null || c.total <= 0;
+      const needArea = !(totals && totals.area); // backfill location for older cache entries
+      if (needTotal || needArea) missing.push(c.id);
     }
     if (!missing.length) return;
 
