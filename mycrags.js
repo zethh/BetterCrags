@@ -7,7 +7,7 @@
   const USERNAME_KEY = 'bc_username_v1';
   const CRAG_TOTALS_KEY = 'bc_crag_totals_v1';
   const ASCENTS_CACHE_KEY = 'bc_mycrags_ascents_v1';
-  const CRAG_FETCH_CACHE_KEY = 'bc_mycrags_crag_fetched_v2'; // v2: also backfills crag area
+  const CRAG_FETCH_CACHE_KEY = 'bc_mycrags_crag_fetched_v3'; // v3: cache area even when route total is 0
   const CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 1 day for ascents (cheap to refetch)
   const CRAG_PAGE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
@@ -1040,6 +1040,7 @@
                   return `<li>
                   <span class="d">${escapeHtml(r.date)}</span>
                   <span class="g">${escapeHtml(r.gradeLabel || '')}</span>
+                  <span class="ty">${escapeHtml(genreOf(r))}</span>
                   <span class="r">${route}${crag}</span>
                 </li>`;
                 }).join('')}
@@ -1238,8 +1239,13 @@
         const id = toFetch[i++];
         const result = await fetchCragTotal(id);
         completed++;
-        if (result && result.total > 0) {
-          totalsRaw[id] = { ...result, t: now };
+        // Keep the result if it has a route total OR a location — the route
+        // list is sometimes client-rendered (total comes back 0), but the area
+        // still parses and is worth caching. Merge so a 0 total never clobbers
+        // a previously-known one.
+        if (result && (result.total > 0 || result.area)) {
+          const prev = totalsRaw[id] || {};
+          totalsRaw[id] = { ...prev, ...result, total: result.total > 0 ? result.total : prev.total, t: now };
         }
         fetchedRaw[id] = { t: now };
         if (completed % 3 === 0 || completed === toFetch.length) {
