@@ -320,6 +320,7 @@
     activeYear: null,     // 'all' or 'YYYY'
     compareYear: null,    // 'YYYY' to compare against, or null
     selectedMonth: null,  // 1..12 or null
+    activeGenreMonth: 'all', // 'all' | 'Boulder' | 'Sport' | 'Other'
     selectedCragId: null, // crag spotlight
   };
 
@@ -930,23 +931,49 @@
     let detailHtml = '';
     if (state.activeYear !== 'all' && state.selectedMonth) {
       const prefix = `${state.activeYear}-${String(state.selectedMonth).padStart(2, '0')}-`;
-      const rows = state.done.filter(r => r.date && r.date.startsWith(prefix));
+      const genreOf = (r) => (r.genre === 'Boulder' ? 'Boulder' : r.genre === 'Sport' ? 'Sport' : 'Other');
+      const monthRows = state.done.filter(r => r.date && r.date.startsWith(prefix));
+
+      // Genre filter — only offer chips for genres actually present this month.
+      const present = new Set(monthRows.map(genreOf));
+      const genreChips = ['all', 'Boulder', 'Sport', 'Other']
+        .filter(g => g === 'all' || present.has(g))
+        .map(g => {
+          const lbl = g === 'all' ? 'All' : g;
+          return `<button class="mc-chip" data-mc-genre="${g}" data-active="${g === state.activeGenreMonth ? '1' : '0'}">${escapeHtml(lbl)}</button>`;
+        }).join('');
+      const genreRow = present.size > 1 ? `<div class="mc-chip-row"><span class="lbl">Type</span>${genreChips}</div>` : '';
+
+      const gFilter = state.activeGenreMonth;
+      const rows = monthRows.filter(r => gFilter === 'all' || genreOf(r) === gFilter);
       rows.sort((a, b) => (a.date || '').localeCompare(b.date || ''));
       const cmpRows = state.compareYear
-        ? state.done.filter(r => r.date && r.date.startsWith(`${state.compareYear}-${String(state.selectedMonth).padStart(2, '0')}-`))
+        ? state.done.filter(r => r.date && r.date.startsWith(`${state.compareYear}-${String(state.selectedMonth).padStart(2, '0')}-`) && (gFilter === 'all' || genreOf(r) === gFilter))
         : null;
       const cmpDelta = cmpRows ? deltaPill(rows.length, cmpRows.length) : '';
       detailHtml = `
         <div class="mc-month-detail">
           <h4>${escapeHtml(MONTHS[state.selectedMonth - 1])} ${escapeHtml(state.activeYear)} — ${rows.length} sends ${cmpDelta}</h4>
+          ${genreRow}
           <ul>
             ${rows.length === 0
               ? '<li class="mc-status-text">No sends this month.</li>'
-              : rows.map(r => `<li>
+              : rows.map(r => {
+                  const routeHref = r.key ? `https://thetopo.com/crags/${r.key.split('/').map(encodeURIComponent).join('/routes/')}` : '';
+                  const route = r.routeName
+                    ? (routeHref
+                        ? `<a href="${routeHref}" target="_blank" rel="noopener">${escapeHtml(r.routeName)}</a>`
+                        : escapeHtml(r.routeName))
+                    : '';
+                  const crag = r.cragName
+                    ? ` · <a class="crag" href="https://thetopo.com/crags/${encodeURIComponent(r.cragId)}" target="_blank" rel="noopener">${escapeHtml(r.cragName)}</a>`
+                    : '';
+                  return `<li>
                   <span class="d">${escapeHtml(r.date)}</span>
                   <span class="g">${escapeHtml(r.gradeLabel || '')}</span>
-                  <span class="r">${escapeHtml(r.routeName || '')}${r.cragName ? ' · <span style="color:var(--text-muted)">' + escapeHtml(r.cragName) + '</span>' : ''}</span>
-                </li>`).join('')}
+                  <span class="r">${route}${crag}</span>
+                </li>`;
+                }).join('')}
           </ul>
         </div>
       `;
@@ -968,6 +995,14 @@
       el.addEventListener('click', () => {
         const m = +el.getAttribute('data-mc-month');
         state.selectedMonth = state.selectedMonth === m ? null : m;
+        state.activeGenreMonth = 'all';
+        renderActivity();
+      });
+    });
+
+    body.querySelectorAll('[data-mc-genre]').forEach(el => {
+      el.addEventListener('click', () => {
+        state.activeGenreMonth = el.getAttribute('data-mc-genre');
         renderActivity();
       });
     });

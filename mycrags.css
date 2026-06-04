@@ -471,6 +471,7 @@ a:hover { color: #8fc7ff; text-decoration: underline; }
 .mc-month-detail li .d { color: var(--text-muted); min-width: 64px; }
 .mc-month-detail li .g { color: var(--text-strong); min-width: 36px; }
 .mc-month-detail li .r { color: var(--text); }
+.mc-month-detail li .r a.crag { color: var(--text-muted); }
 
 /* ── Crag spotlight ───────────────────────────────────────────────── */
 .mc-spotlight-body {

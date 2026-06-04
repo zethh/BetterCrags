@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "BetterCrags",
-  "version": "0.25.1",
+  "version": "0.26.0",
   "description": "Adds exclude-feature filters, a minimum-ascents filter, a My Crags dashboard (todo/done/completion% per crag), hides premium upsell promos, and adds a site-wide dark mode for thetopo.com.",
   "permissions": ["storage", "activeTab"],
   "host_permissions": ["https://thetopo.com/*"],
