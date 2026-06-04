@@ -73,7 +73,10 @@
   }
 
   // Grade tokens within longer text — extract the first reasonable token.
-  const GRADE_TOKEN_RE = /\b\d[A-Da-c]\+?\b|\b\d\+?\b/g;
+  // NB: a trailing \b can never sit after a "+" (a "+" before whitespace/end has
+  // no word boundary), so \b would make the engine backtrack and silently drop the
+  // "+", folding every plus-grade into its base (7A+ → 7A). Use a no-alnum lookahead.
+  const GRADE_TOKEN_RE = /\b\d[A-Da-c]\+?(?![A-Za-z0-9])|\b\d\+?(?![A-Za-z0-9])/g;
   function findGradeInText(text) {
     if (!text) return null;
     const candidates = text.match(GRADE_TOKEN_RE) || [];
