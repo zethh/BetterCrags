@@ -192,7 +192,18 @@
         }
       }
 
-      const routeName = (a.textContent || '').trim();
+      // route name: the matched anchor is sometimes a thumbnail/icon link with
+      // no text — fall back to any route anchor in the row that actually has text.
+      let routeName = (a.textContent || '').trim();
+      if (!routeName) {
+        for (const ra of row.querySelectorAll('a[href]')) {
+          const rh = ra.getAttribute('href') || '';
+          if (/\/crags\/[^/?#]+\/routes\/[^/?#]+/.test(rh)) {
+            const t = (ra.textContent || '').trim();
+            if (t) { routeName = t; break; }
+          }
+        }
+      }
       // grade: scan row text but exclude the route name to avoid name-collisions
       const rowText = (row.textContent || '').replace(routeName, ' ');
       const grade = findGradeInText(rowText);
