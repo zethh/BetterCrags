@@ -334,16 +334,19 @@ a:hover { color: #8fc7ff; text-decoration: underline; }
 .mc-tl-card.dragging { opacity: 0.4; }
 .mc-tl-card:active { cursor: grabbing; }
 .mc-tl-card .g { font-weight: 700; color: var(--text-strong); min-width: 32px; }
-.mc-tl-card .nm { font-weight: 600; color: var(--text-strong); }
+.mc-tl-card .nm { font-weight: 600; color: var(--text-strong); text-decoration: none; cursor: pointer; }
+.mc-tl-card .nm:hover { text-decoration: underline; }
 .mc-tl-card .rt { color: #f5a623; letter-spacing: 0.5px; }
 .mc-tl-card .rt.unk { color: var(--border-strong); }
 .mc-tl-card .as { color: var(--text-muted); font-variant-numeric: tabular-nums; }
 .mc-tl-card .cr { color: var(--text-muted); flex-basis: 100%; font-size: 11px; }
-.mc-tl-card .lk, .mc-tl-card .nb {
+.mc-tl-card .cr a { color: var(--text-muted); text-decoration: none; cursor: pointer; }
+.mc-tl-card .cr a:hover { color: var(--text); text-decoration: underline; }
+.mc-tl-card .nb {
   background: transparent; border: none; color: var(--text-muted);
   cursor: pointer; text-decoration: none; font-size: 13px; padding: 0 2px;
 }
-.mc-tl-card .lk:hover, .mc-tl-card .nb:hover { color: var(--text); }
+.mc-tl-card .nb:hover { color: var(--text); }
 .mc-tl-card .nb.has { color: #f5a623; }
 .mc-tl-card .nt { flex-basis: 100%; }
 .mc-tl-card .nt textarea {

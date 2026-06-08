@@ -968,16 +968,17 @@
 
   // ── Cards + tier rows ──
   function cardHtml(it, note) {
+    const cragId = it.key.split('/')[0] || '';
     const routeHref = `https://thetopo.com/crags/${it.key.split('/').map(encodeURIComponent).join('/routes/')}`;
+    const cragHref = `https://thetopo.com/crags/${encodeURIComponent(cragId)}`;
     const hasNote = !!note;
     return `
       <div class="mc-tl-card" draggable="true" data-key="${escapeHtml(it.key)}">
         <span class="g">${escapeHtml(it.gradeLabel || '—')}</span>
-        <span class="nm">${escapeHtml(it.routeName || '(unnamed)')}</span>
+        <a class="nm" href="${routeHref}" target="_blank" rel="noopener" draggable="false" title="Open route on thetopo">${escapeHtml(it.routeName || '(unnamed)')}</a>
         <span class="rt ${it.hasStats ? '' : 'unk'}" title="${it.hasStats ? it.rating.toFixed(1) + ' / 3' : 'rating not fetched'}">${starsHtml(it.rating)}</span>
         <span class="as" title="ascents logged">${it.hasStats ? it.ascents : '–'}</span>
-        <span class="cr">${escapeHtml(it.cragName)}${it.area ? ` · ${escapeHtml(it.area)}` : ''}</span>
-        <a class="lk" href="${routeHref}" target="_blank" rel="noopener" draggable="false" title="Open on thetopo">↗</a>
+        <span class="cr"><a href="${cragHref}" target="_blank" rel="noopener" draggable="false" title="Open crag on thetopo">${escapeHtml(it.cragName)}</a>${it.area ? ` · ${escapeHtml(it.area)}` : ''}</span>
         <button class="nb${hasNote ? ' has' : ''}" draggable="false" title="Notes">✎</button>
         <div class="nt" hidden><textarea placeholder="notes…">${escapeHtml(note || '')}</textarea></div>
       </div>`;
