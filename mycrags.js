@@ -836,12 +836,25 @@
     el.innerHTML = '';
     const sel = document.createElement('select');
     sel.className = 'mc-pb-list-select';
-    for (const l of b.lists) {
+    const addOption = (parent, l) => {
       const o = document.createElement('option');
       o.value = l.id;
-      o.textContent = l.imported ? `📥 ${l.name}` : l.name;
+      o.textContent = l.name;
       if (l.id === b.activeListId) o.selected = true;
-      sel.appendChild(o);
+      parent.appendChild(o);
+    };
+    const own = b.lists.filter(l => !l.imported);
+    const imported = b.lists.filter(l => l.imported);
+    if (own.length && imported.length) {
+      const g1 = document.createElement('optgroup'); g1.label = 'My lists';
+      own.forEach(l => addOption(g1, l));
+      sel.appendChild(g1);
+      const g2 = document.createElement('optgroup'); g2.label = 'Imported';
+      imported.forEach(l => addOption(g2, l));
+      sel.appendChild(g2);
+    } else {
+      // Only one kind present — no need for group headers.
+      b.lists.forEach(l => addOption(sel, l));
     }
     sel.addEventListener('change', () => { b.activeListId = sel.value; saveBoard(); renderBoard(); });
     el.appendChild(sel);
