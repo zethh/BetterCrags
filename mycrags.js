@@ -1317,7 +1317,7 @@
       btn.disabled = true;
       setStatus(`Loading ${m.name}…`, true);
       boardBrowse = await loadBrowseScope(m.type, m.id, m.name);
-      Object.assign(boardBrowse, { genre: 'all', gradeMin: null, gradeMax: null, minStars: 0 });
+      Object.assign(boardBrowse, { genre: 'all', gradeMin: null, gradeMax: null, minStars: 0, nameQuery: '' });
       setStatus('', false);
       results.hidden = true;
       renderBrowse(browseEl, list);
@@ -1328,31 +1328,36 @@
       const add = e.target.closest('.mc-pb-sr');
       if (add && !add.disabled) {
         const m = (boardBrowse.routes || []).find(x => x.key === add.dataset.id);
-        if (m) addRouteToList(list, m, () => renderBrowse(browseEl, list));
+        if (m) addRouteToList(list, m, () => renderBrowseResults(browseEl, list));
         return;
       }
       if (e.target.closest('.mc-pb-browse-addall')) {
-        const matching = filterBrowse(boardBrowse);
-        const have = new Set(list.items.map(i => i.key));
-        const toAdd = matching.filter(m => !have.has(m.key));
+        const toAdd = filterBrowse(boardBrowse).filter(m => !list.items.some(i => i.key === m.key));
         if (!toAdd.length) return;
         if (toAdd.length > 30 && !confirm(`Add all ${toAdd.length} routes to this list?`)) return;
         for (const m of toAdd) list.items.push({ key: m.key, routeName: m.routeName, gradeLabel: m.gradeLabel, gradeInt: m.gradeInt, genre: m.genre, cragName: m.cragName, area: m.area || '' });
         saveBoard();
         renderTierArea(list);
-        renderBrowse(browseEl, list);
+        renderBrowseResults(browseEl, list);
       }
     });
     browseEl.addEventListener('change', (e) => {
       const sel = e.target.closest('[data-bf]');
       if (!sel || !boardBrowse) return;
       const f = sel.getAttribute('data-bf');
+      if (f === 'name') return; // handled live by the input listener
       const v = sel.value;
       if (f === 'genre') boardBrowse.genre = v;
       else if (f === 'min') boardBrowse.gradeMin = v ? +v : null;
       else if (f === 'max') boardBrowse.gradeMax = v ? +v : null;
       else if (f === 'stars') boardBrowse.minStars = v ? +v : 0;
       renderBrowse(browseEl, list);
+    });
+    browseEl.addEventListener('input', (e) => {
+      const nameInput = e.target.closest('.mc-pb-browse-name');
+      if (!nameInput || !boardBrowse) return;
+      boardBrowse.nameQuery = nameInput.value;
+      renderBrowseResults(browseEl, list);
     });
 
     // Restore an in-progress browse across full re-renders.
@@ -1384,11 +1389,13 @@
   }
 
   function filterBrowse(b) {
+    const q = (b.nameQuery || '').trim().toLowerCase();
     return (b.routes || []).filter(it => {
       if (b.genre !== 'all' && it.bucket !== b.genre) return false;
       if (b.gradeMin != null && (!it.gradeInt || it.gradeInt < b.gradeMin)) return false;
       if (b.gradeMax != null && (!it.gradeInt || it.gradeInt > b.gradeMax)) return false;
       if (b.minStars && it.rating < b.minStars) return false;
+      if (q && !(it.routeName || '').toLowerCase().includes(q) && !(it.cragName || '').toLowerCase().includes(q)) return false;
       return true;
     }).sort((a, c) => (c.rating - a.rating) || (c.gradeInt - a.gradeInt));
   }
@@ -1397,22 +1404,20 @@
     const b = boardBrowse;
     if (!b) { browseEl.hidden = true; return; }
     browseEl.hidden = false;
-    const filtered = filterBrowse(b);
-    const have = new Set(list.items.map(i => i.key));
     const present = new Set(b.routes.map(r => r.bucket));
     const genreOpts = ['all', ...['Boulder', 'Sport', 'Other'].filter(g => present.has(g))];
     const gis = [...new Set(b.routes.map(r => r.gradeInt).filter(g => g > 0))].sort((x, y) => x - y);
     const labelGenre = b.genre === 'Sport' ? 'Sport' : 'Boulder';
     const gradeOpt = (val) => `<option value="">Any</option>` + gis.map(gi => `<option value="${gi}"${val === gi ? ' selected' : ''}>${escapeHtml(intToLabel(gi, labelGenre))}</option>`).join('');
-    const shown = filtered.slice(0, 150);
     browseEl.innerHTML = `
       <div class="mc-pb-browse-h">
         <button type="button" class="mc-pb-browse-back">← search</button>
         <strong>${escapeHtml(b.name)}</strong>
-        <span class="sub">${filtered.length} of ${b.routes.length} routes</span>
-        <button type="button" class="mc-pb-browse-addall">+ Add all (${filtered.length})</button>
+        <span class="sub" data-browse-count></span>
+        <button type="button" class="mc-pb-browse-addall"></button>
       </div>
       <div class="mc-pb-browse-filters">
+        <input type="search" class="mc-pb-browse-name" data-bf="name" placeholder="Filter by name…" autocomplete="off" value="${escapeHtml(b.nameQuery || '')}" />
         <select data-bf="genre">${genreOpts.map(g => `<option value="${g}"${g === b.genre ? ' selected' : ''}>${g === 'all' ? 'All types' : g}</option>`).join('')}</select>
         <span class="lbl">Grade</span>
         <select data-bf="min">${gradeOpt(b.gradeMin)}</select>
@@ -1425,19 +1430,35 @@
           <option value="3"${b.minStars === 3 ? ' selected' : ''}>★ 3</option>
         </select>
       </div>
-      <div class="mc-pb-search-results" style="margin-top:0;border-radius:0 0 8px 8px;">
-        ${shown.length ? shown.map(m => {
-          const has = have.has(m.key);
-          return `<button type="button" class="mc-pb-sr" data-id="${escapeHtml(m.key)}"${has ? ' disabled' : ''}>
-            <span class="g">${escapeHtml(m.gradeLabel || '?')}</span>
-            <span class="nm">${escapeHtml(m.routeName || '(unnamed)')}</span>
-            <span class="rt">${starsHtml(m.rating)}</span>
-            <span class="cr">${escapeHtml(m.cragName || '')}</span>
-            <span class="${has ? 'added' : 'add'}">${has ? 'added' : '+ add'}</span>
-          </button>`;
-        }).join('') : '<div class="mc-pb-sr-empty">No routes match these filters.</div>'}
-        ${filtered.length > shown.length ? `<div class="mc-pb-sr-empty">Showing first ${shown.length} — narrow the filters or use “Add all”.</div>` : ''}
-      </div>`;
+      <div class="mc-pb-search-results mc-pb-browse-list" style="margin-top:0;border-radius:0 0 8px 8px;"></div>`;
+    renderBrowseResults(browseEl, list);
+  }
+
+  // Re-render only the route list + counts (so the name filter keeps focus).
+  function renderBrowseResults(browseEl, list) {
+    const b = boardBrowse;
+    if (!b) return;
+    const filtered = filterBrowse(b);
+    const have = new Set(list.items.map(i => i.key));
+    const shown = filtered.slice(0, 150);
+    const countEl = browseEl.querySelector('[data-browse-count]');
+    if (countEl) countEl.textContent = `${filtered.length} of ${b.routes.length} routes`;
+    const addAll = browseEl.querySelector('.mc-pb-browse-addall');
+    if (addAll) addAll.textContent = `+ Add all (${filtered.length})`;
+    const listEl = browseEl.querySelector('.mc-pb-browse-list');
+    if (!listEl) return;
+    listEl.innerHTML = `
+      ${shown.length ? shown.map(m => {
+        const has = have.has(m.key);
+        return `<button type="button" class="mc-pb-sr" data-id="${escapeHtml(m.key)}"${has ? ' disabled' : ''}>
+          <span class="g">${escapeHtml(m.gradeLabel || '?')}</span>
+          <span class="nm">${escapeHtml(m.routeName || '(unnamed)')}</span>
+          <span class="rt">${starsHtml(m.rating)}</span>
+          <span class="cr">${escapeHtml(m.cragName || '')}</span>
+          <span class="${has ? 'added' : 'add'}">${has ? 'added' : '+ add'}</span>
+        </button>`;
+      }).join('') : '<div class="mc-pb-sr-empty">No routes match these filters.</div>'}
+      ${filtered.length > shown.length ? `<div class="mc-pb-sr-empty">Showing first ${shown.length} — narrow the filters or use “Add all”.</div>` : ''}`;
   }
 
   // Rebuild the active list's tier + order maps from the DOM after a drag.

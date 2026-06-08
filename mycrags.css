@@ -435,6 +435,13 @@ a:hover { color: #8fc7ff; text-decoration: underline; }
   font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-muted);
 }
 .mc-pb-browse-filters .dash { color: var(--text-muted); }
+.mc-pb-browse-name {
+  flex: 1 1 160px; min-width: 120px;
+  background: var(--bg-elev-2); color: var(--text);
+  border: 1px solid var(--border-strong); border-radius: 6px;
+  padding: 4px 8px; font: inherit; font-size: 12px;
+}
+.mc-pb-browse-name::placeholder { color: var(--text-muted); }
 .mc-pb-browse-filters select {
   background: var(--bg-elev-2); color: var(--text);
   border: 1px solid var(--border-strong); border-radius: 6px;
