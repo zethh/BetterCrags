@@ -7,9 +7,13 @@
   const USERNAME_KEY = 'bc_username_v1';
   const CRAG_TOTALS_KEY = 'bc_crag_totals_v1';
   const ASCENTS_CACHE_KEY = 'bc_mycrags_ascents_v1';
-  const CRAG_FETCH_CACHE_KEY = 'bc_mycrags_crag_fetched_v3'; // v3: cache area even when route total is 0
+  const CRAG_FETCH_CACHE_KEY = 'bc_mycrags_crag_fetched_v4'; // v4: capture area param_id for routelist fetches
+  const ROUTE_STATS_KEY = 'bc_route_stats_v1';  // routeKey → { rating, ascents, gradeInt, genre }
+  const BOARD_KEY = 'bc_project_board_v1';       // personal priority board: order, tiers, notes
   const CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 1 day for ascents (cheap to refetch)
   const CRAG_PAGE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+  const ROUTE_STATS_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+  const TIERS = ['', 'A', 'B', 'C'];
 
   // Grade tables mirror content.js. Font is upper-case letters, French lower-case.
   const FONT_GRADES = [
@@ -285,10 +289,18 @@
   function parseCragLocation(doc) {
     const a = doc.querySelector('.area-container a');
     const txt = a ? (a.textContent || '').trim() : '';
-    if (!txt) return { area: '', country: '' };
+    // The area link points at /areas/<param_id> — that slug is what the
+    // routelist endpoint needs to pull per-route rating/ascent data.
+    let areaParamId = '';
+    const areaA = doc.querySelector('.area-container a[href^="/areas/"]') || doc.querySelector('a[href^="/areas/"]');
+    if (areaA) {
+      const m = (areaA.getAttribute('href') || '').match(/^\/areas\/([^/?#]+)/);
+      if (m) areaParamId = decodeURIComponent(m[1]);
+    }
+    if (!txt) return { area: '', country: '', areaParamId };
     const i = txt.lastIndexOf(',');
-    if (i === -1) return { area: txt, country: '' };
-    return { area: txt.slice(0, i).trim(), country: txt.slice(i + 1).trim() };
+    if (i === -1) return { area: txt, country: '', areaParamId };
+    return { area: txt.slice(0, i).trim(), country: txt.slice(i + 1).trim(), areaParamId };
   }
 
   // Fetch a single crag page and try to derive total route counts + grade
@@ -331,6 +343,66 @@
     }
   }
 
+  // The area routelist page (/areas/<param_id>/routelist) embeds a RouteList
+  // store with every route in the area, each carrying rating + ascent counts —
+  // the only place those per-route stats are exposed. One fetch covers a whole
+  // area, so we enrich all todos in an area with a single request.
+  async function fetchAreaRoutes(areaParamId) {
+    const qs = new URLSearchParams({ grade_min: '100', grade_max: '1500' });
+    for (const g of ['Boulder', 'Sport', 'Traditional', 'DWS', 'Other']) qs.set(g, '1');
+    try {
+      const doc = await fetchHtml(`/areas/${encodeURIComponent(areaParamId)}/routelist?${qs.toString()}`);
+      const tag = doc.querySelector('script[data-component-name="RouteList"]');
+      if (!tag) return [];
+      const store = JSON.parse(tag.textContent);
+      return Array.isArray(store.routes) ? store.routes : [];
+    } catch {
+      return [];
+    }
+  }
+
+  // Pull rating + ascent counts for every todo route by fetching each area
+  // (that has todos) once and indexing the routes we care about. Cached per
+  // area with a TTL so repeat opens are instant.
+  async function enrichTodoStats(force) {
+    const myKeys = new Set(state.todo.map(r => r.key));
+    if (!myKeys.size) { state.routeStats = {}; return; }
+    const cache = (await get(ROUTE_STATS_KEY)) || { stats: {}, areas: {} };
+    cache.stats = cache.stats || {};
+    cache.areas = cache.areas || {};
+    const now = Date.now();
+
+    const areaIds = new Set();
+    for (const r of state.todo) {
+      const tot = state.cragTotals[r.cragId];
+      if (tot && tot.areaParamId) areaIds.add(tot.areaParamId);
+    }
+    const stale = [...areaIds].filter(a => force || !cache.areas[a] || (now - cache.areas[a]) > ROUTE_STATS_TTL_MS);
+    if (stale.length) {
+      let done = 0;
+      setStatus(`Fetching route ratings (0/${stale.length} areas)…`, true);
+      for (const areaId of stale) {
+        const routes = await fetchAreaRoutes(areaId);
+        for (const rt of routes) {
+          const key = `${rt.crag_param_id || ''}/${rt.param_id || ''}`;
+          if (myKeys.has(key)) {
+            cache.stats[key] = {
+              rating: parseFloat(rt.rating) || 0,
+              ascents: rt.ascents_done_count || 0,
+              gradeInt: rt.grade_int || 0,
+              genre: rt.genre || '',
+            };
+          }
+        }
+        cache.areas[areaId] = now;
+        done++;
+        setStatus(`Fetching route ratings (${done}/${stale.length} areas)…`, true);
+      }
+      await set(ROUTE_STATS_KEY, cache);
+    }
+    state.routeStats = cache.stats;
+  }
+
   // ── State & rendering ─────────────────────────────────────────────
   const state = {
     user: '',
@@ -347,7 +419,16 @@
     selectedMonth: null,  // 1..12 or null
     activeGenreMonth: 'all', // 'all' | 'Boulder' | 'Sport' | 'Other'
     selectedCragId: null, // crag spotlight
+    routeStats: {},       // routeKey → { rating, ascents, gradeInt, genre }
+    board: null,          // personal priority board (loaded from storage)
   };
+
+  // Default shape for the project board. order: priority sequence of route
+  // keys; tiers/notes keyed by route key; genre/areas are the active filters
+  // (areas null = show all).
+  function defaultBoard() {
+    return { order: [], tiers: {}, notes: {}, genre: 'all', areas: null };
+  }
 
   const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
@@ -609,6 +690,240 @@
         </div>
       `;
     }).join('');
+    card.hidden = false;
+  }
+
+  // ── Project board: prioritise todos with drag-drop, tiers & notes ──
+  function bucketOf(genre) {
+    return genre === 'Boulder' ? 'Boulder' : genre === 'Sport' ? 'Sport' : 'Other';
+  }
+
+  function starsHtml(rating) {
+    const full = Math.round(rating || 0);
+    let s = '';
+    for (let i = 1; i <= 5; i++) s += i <= full ? '★' : '☆';
+    return s;
+  }
+
+  let boardSaveTimer = null;
+  function saveBoard() {
+    if (boardSaveTimer) clearTimeout(boardSaveTimer);
+    boardSaveTimer = setTimeout(() => { set(BOARD_KEY, state.board); boardSaveTimer = null; }, 250);
+  }
+
+  async function loadBoard() {
+    const saved = await get(BOARD_KEY);
+    state.board = Object.assign(defaultBoard(), saved || {});
+    state.board.order = state.board.order || [];
+    state.board.tiers = state.board.tiers || {};
+    state.board.notes = state.board.notes || {};
+  }
+
+  // Enriched todo rows: grade + genre + rating + ascents + area, ready to show.
+  function boardItems() {
+    return state.todo.map(r => {
+      const tot = state.cragTotals[r.cragId] || {};
+      const stats = state.routeStats[r.key];
+      const s = stats || {};
+      const genre = r.genre || s.genre || '';
+      const gradeInt = r.gradeInt || s.gradeInt || 0;
+      return {
+        key: r.key,
+        cragId: r.cragId,
+        routeName: r.routeName || '',
+        cragName: r.cragName || tot.name || r.cragId,
+        area: tot.area || '',
+        gradeLabel: r.gradeLabel || (gradeInt ? intToLabel(gradeInt, genre) : ''),
+        gradeInt,
+        bucket: bucketOf(genre),
+        rating: s.rating || 0,
+        ascents: s.ascents || 0,
+        hasStats: !!stats,
+      };
+    });
+  }
+
+  // Make sure every current todo key has a slot in the priority order, so drag
+  // reordering stays globally consistent even when filters hide some rows.
+  // New keys land at the end, pre-sorted hardest-then-best-rated.
+  function ensureBoardOrder(items) {
+    const inOrder = new Set(state.board.order);
+    const missing = items.filter(it => !inOrder.has(it.key));
+    if (missing.length) {
+      missing.sort((a, b) => (b.gradeInt - a.gradeInt) || (b.rating - a.rating));
+      state.board.order.push(...missing.map(it => it.key));
+      saveBoard();
+    }
+  }
+
+  // Reorder the GLOBAL priority list from the new visible sequence: walk the
+  // global order and, wherever a visible key sat, drop in the next visible key
+  // — hidden items keep their slots.
+  function applyDragOrder(visibleOrder) {
+    const visibleSet = new Set(visibleOrder);
+    let vi = 0;
+    state.board.order = state.board.order.map(k => visibleSet.has(k) ? visibleOrder[vi++] : k);
+    saveBoard();
+  }
+
+  function autoGrow(ta) {
+    ta.style.height = 'auto';
+    ta.style.height = Math.min(160, ta.scrollHeight) + 'px';
+  }
+
+  function renderBoardGenreTabs(items, current) {
+    const container = $('#mc-pb-genre-tabs');
+    const present = new Set(items.map(it => it.bucket));
+    const opts = ['all', ...['Boulder', 'Sport', 'Other'].filter(g => present.has(g))];
+    container.innerHTML = '';
+    for (const g of opts) {
+      const btn = document.createElement('button');
+      btn.textContent = g === 'all' ? 'All' : g;
+      if (g === current) btn.dataset.active = '1';
+      btn.addEventListener('click', () => { state.board.genre = g; saveBoard(); renderBoard(); });
+      container.appendChild(btn);
+    }
+  }
+
+  function renderBoardAreaChips(items, genre) {
+    const container = $('#mc-pb-areas');
+    const counts = new Map();
+    for (const it of items) {
+      if (genre !== 'all' && it.bucket !== genre) continue;
+      const a = it.area || '';
+      const e = counts.get(a) || { label: it.area || 'Unknown', count: 0 };
+      e.count++; counts.set(a, e);
+    }
+    container.innerHTML = '';
+    if (counts.size <= 1) { state.board.areas = null; return; }
+    const sel = state.board.areas;
+    const allBtn = document.createElement('button');
+    allBtn.textContent = 'All areas';
+    if (!sel) allBtn.dataset.active = '1';
+    allBtn.addEventListener('click', () => { state.board.areas = null; saveBoard(); renderBoard(); });
+    container.appendChild(allBtn);
+    const ordered = [...counts.entries()].sort((a, b) => b[1].count - a[1].count || a[1].label.localeCompare(b[1].label));
+    for (const [a, { label, count }] of ordered) {
+      const btn = document.createElement('button');
+      btn.textContent = `${label} (${count})`;
+      if (sel && sel.includes(a)) btn.dataset.active = '1';
+      btn.addEventListener('click', () => {
+        let s = Array.isArray(state.board.areas) ? [...state.board.areas] : [];
+        s = s.includes(a) ? s.filter(x => x !== a) : [...s, a];
+        state.board.areas = s.length ? s : null;
+        saveBoard(); renderBoard();
+      });
+      container.appendChild(btn);
+    }
+  }
+
+  let boardWired = false;
+  function wireBoard() {
+    if (boardWired) return;
+    const list = $('#mc-pb-list');
+    if (!list) return;
+    boardWired = true;
+
+    list.addEventListener('dragstart', (e) => {
+      const handle = e.target.closest('.mc-pb-drag');
+      if (!handle) { e.preventDefault(); return; }
+      const row = handle.closest('.mc-pb-row');
+      if (!row) return;
+      row.classList.add('dragging');
+      e.dataTransfer.effectAllowed = 'move';
+      try { e.dataTransfer.setData('text/plain', row.dataset.key); } catch {}
+      try { e.dataTransfer.setDragImage(row, 20, 20); } catch {}
+    });
+    list.addEventListener('dragover', (e) => {
+      const dragging = list.querySelector('.mc-pb-row.dragging');
+      if (!dragging) return;
+      e.preventDefault();
+      const row = e.target.closest('.mc-pb-row');
+      if (!row || row === dragging) return;
+      const rect = row.getBoundingClientRect();
+      const after = (e.clientY - rect.top) > rect.height / 2;
+      list.insertBefore(dragging, after ? row.nextSibling : row);
+    });
+    list.addEventListener('drop', (e) => e.preventDefault());
+    list.addEventListener('dragend', () => {
+      const dragging = list.querySelector('.mc-pb-row.dragging');
+      if (dragging) dragging.classList.remove('dragging');
+      applyDragOrder([...list.querySelectorAll('.mc-pb-row')].map(r => r.dataset.key));
+      renderBoard();
+    });
+
+    list.addEventListener('change', (e) => {
+      const sel = e.target.closest('.mc-pb-tier');
+      if (!sel) return;
+      const row = sel.closest('.mc-pb-row');
+      const key = row && row.dataset.key;
+      if (!key) return;
+      if (sel.value) state.board.tiers[key] = sel.value; else delete state.board.tiers[key];
+      row.className = `mc-pb-row${sel.value ? ` tier-${sel.value}` : ''}`;
+      saveBoard();
+    });
+    list.addEventListener('input', (e) => {
+      const ta = e.target.closest('.mc-pb-note');
+      if (!ta) return;
+      const row = ta.closest('.mc-pb-row');
+      const key = row && row.dataset.key;
+      if (!key) return;
+      if (ta.value) state.board.notes[key] = ta.value; else delete state.board.notes[key];
+      autoGrow(ta);
+      saveBoard();
+    });
+  }
+
+  function renderBoard() {
+    const card = $('#mc-pb-card');
+    if (!card) return;
+    if (!state.board) state.board = defaultBoard();
+    const items = boardItems();
+    if (!items.length) { card.hidden = true; return; }
+    ensureBoardOrder(items);
+    const byKey = new Map(items.map(it => [it.key, it]));
+    const genre = state.board.genre || 'all';
+    renderBoardGenreTabs(items, genre);
+    renderBoardAreaChips(items, genre);
+
+    const selAreas = state.board.areas;
+    const visible = state.board.order
+      .map(k => byKey.get(k))
+      .filter(Boolean)
+      .filter(it => genre === 'all' || it.bucket === genre)
+      .filter(it => !selAreas || selAreas.includes(it.area || ''));
+
+    const list = $('#mc-pb-list');
+    if (!visible.length) {
+      list.innerHTML = `<div class="mc-card-sub" style="padding:14px 16px;">No todos match these filters.</div>`;
+      card.hidden = false;
+      return;
+    }
+    list.innerHTML = visible.map((it, i) => {
+      const tier = state.board.tiers[it.key] || '';
+      const note = state.board.notes[it.key] || '';
+      const routeHref = `https://thetopo.com/crags/${it.key.split('/').map(encodeURIComponent).join('/routes/')}`;
+      const ratingTitle = it.hasStats ? `${it.rating.toFixed(1)} / 5` : 'rating not fetched yet';
+      return `
+        <div class="mc-pb-row${tier ? ` tier-${tier}` : ''}" data-key="${escapeHtml(it.key)}">
+          <span class="mc-pb-drag" draggable="true" title="Drag to reorder">⠿</span>
+          <span class="mc-pb-rank">${i + 1}</span>
+          <select class="mc-pb-tier" title="Priority tier">
+            ${TIERS.map(t => `<option value="${t}"${t === tier ? ' selected' : ''}>${t || '—'}</option>`).join('')}
+          </select>
+          <span class="mc-pb-grade">${escapeHtml(it.gradeLabel || '—')}</span>
+          <span class="mc-pb-genre">${escapeHtml(it.bucket)}</span>
+          <span class="mc-pb-rating ${it.hasStats ? '' : 'unk'}" title="${escapeHtml(ratingTitle)}">${starsHtml(it.rating)}</span>
+          <span class="mc-pb-ascents" title="ascents logged on thetopo">${it.hasStats ? it.ascents : '–'}<span class="lbl"> asc</span></span>
+          <span class="mc-pb-name">
+            <a href="${routeHref}" target="_blank" rel="noopener">${escapeHtml(it.routeName || '(unnamed)')}</a>
+            <span class="crag">· ${escapeHtml(it.cragName)}${it.area ? ` · ${escapeHtml(it.area)}` : ''}</span>
+          </span>
+          <textarea class="mc-pb-note" rows="1" placeholder="notes…">${escapeHtml(note)}</textarea>
+        </div>
+      `;
+    }).join('');
+    list.querySelectorAll('.mc-pb-note').forEach(autoGrow);
     card.hidden = false;
   }
 
@@ -1197,6 +1512,7 @@
     renderSummary();
     renderActivity();
     renderNext();
+    renderBoard();
     renderCrags();
     renderSpotlight();
     renderFirsts();
@@ -1216,7 +1532,9 @@
     for (const c of state.cragsAggregated.values()) {
       const totals = state.cragTotals[c.id];
       const needTotal = c.total == null || c.total <= 0;
-      const needArea = !(totals && totals.area); // backfill location for older cache entries
+      // Backfill location for older cache entries — area name AND its param_id
+      // (needed to fetch per-route rating/ascents from the routelist endpoint).
+      const needArea = !(totals && totals.area && totals.areaParamId);
       if (needTotal || needArea) missing.push(c.id);
     }
     if (!missing.length) return;
@@ -1293,6 +1611,7 @@
   async function loadAllForUser(user, useCache) {
     state.user = user;
     state.cragTotals = (await get(CRAG_TOTALS_KEY)) || {};
+    await loadBoard();
     try {
       await loadAscents(useCache, user);
     } catch (err) {
@@ -1313,6 +1632,7 @@
     updateCacheInfo();
 
     await fillMissingCragTotals();
+    await enrichTodoStats(!useCache);
     renderAll();
     setStatus(`Showing ${state.done.length} sends · ${state.todo.length} todos · ${state.cragsAggregated.size} crags.`, false);
   }
@@ -1326,10 +1646,13 @@
       await loadAllForUser(user, false);
     });
     $('#mc-clear').addEventListener('click', async () => {
-      await remove([ASCENTS_CACHE_KEY, CRAG_FETCH_CACHE_KEY]);
+      // Caches only — the project board (priorities/tiers/notes) is personal
+      // data and deliberately survives a cache clear.
+      await remove([ASCENTS_CACHE_KEY, CRAG_FETCH_CACHE_KEY, ROUTE_STATS_KEY]);
       setStatus('Cache cleared. Hit Refresh to re-fetch.', false);
       updateCacheInfo();
     });
+    wireBoard();
     $('#mc-user-input').addEventListener('keydown', (e) => {
       if (e.key === 'Enter') $('#mc-refresh').click();
     });
