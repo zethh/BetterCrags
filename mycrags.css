@@ -400,6 +400,47 @@ a:hover { color: #8fc7ff; text-decoration: underline; }
 .mc-pb-sr .cr { color: var(--text-muted); font-size: 12px; flex: 1; }
 .mc-pb-sr .add { color: var(--accent); font-size: 12px; font-weight: 600; }
 .mc-pb-sr .added { color: var(--text-muted); font-size: 11px; text-transform: uppercase; }
+.mc-pb-sr .rt { color: #f5a623; letter-spacing: 0.5px; font-size: 12px; }
+.mc-pb-sr .g.kind {
+  font-size: 9px; font-weight: 700; letter-spacing: 0.05em;
+  color: var(--text-muted); min-width: 36px;
+}
+
+/* Browse an area/crag */
+.mc-pb-browse { margin-top: 4px; border: 1px solid var(--border-strong); border-radius: 8px; }
+.mc-pb-browse[hidden] { display: none; }
+.mc-pb-browse-h {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  padding: 8px 10px; border-bottom: 1px solid var(--border);
+}
+.mc-pb-browse-h strong { color: var(--text-strong); }
+.mc-pb-browse-h .sub { color: var(--text-muted); font-size: 12px; }
+.mc-pb-browse-back {
+  background: var(--bg-elev-2); color: var(--text-muted);
+  border: 1px solid var(--border-strong); border-radius: 6px;
+  padding: 3px 8px; font: inherit; font-size: 12px; cursor: pointer;
+}
+.mc-pb-browse-back:hover { color: var(--text); }
+.mc-pb-browse-addall {
+  margin-left: auto;
+  background: var(--accent); color: #fff; border: 1px solid var(--accent);
+  border-radius: 6px; padding: 3px 10px; font: inherit; font-size: 12px;
+  font-weight: 600; cursor: pointer;
+}
+.mc-pb-browse-filters {
+  display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+  padding: 8px 10px;
+}
+.mc-pb-browse-filters .lbl {
+  font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-muted);
+}
+.mc-pb-browse-filters .dash { color: var(--text-muted); }
+.mc-pb-browse-filters select {
+  background: var(--bg-elev-2); color: var(--text);
+  border: 1px solid var(--border-strong); border-radius: 6px;
+  padding: 3px 6px; font: inherit; font-size: 12px;
+}
+.mc-pb-browse .mc-pb-search-results { border: none; border-top: 1px solid var(--border); }
 
 .mc-table-wrap { padding: 0 0 6px; overflow-x: auto; }
 .mc-table {
