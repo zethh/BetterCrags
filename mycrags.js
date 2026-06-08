@@ -403,6 +403,116 @@
     state.routeStats = cache.stats;
   }
 
+  // thetopo's universal search. Returns route matches normalised to the shape
+  // tierlist items use. The grade rides along in the name as "(8C)".
+  async function searchRoutes(query) {
+    try {
+      const res = await fetch(`https://thetopo.com/api/web01/search?query=${encodeURIComponent(query)}`,
+        { credentials: 'include', headers: { Accept: 'application/json' } });
+      if (!res.ok) return [];
+      const data = await res.json();
+      const keys = (data && data.search_keys) || [];
+      return keys.filter(k => k.searchable_type === 'Route').map(parseSearchResult).filter(Boolean);
+    } catch {
+      return [];
+    }
+  }
+
+  function parseSearchResult(k) {
+    const m = (k.path || '').match(/^\/crags\/([^/?#]+)\/routes\/([^/?#]+)/);
+    if (!m) return null;
+    const cragId = decodeURIComponent(m[1]);
+    const routeId = decodeURIComponent(m[2]);
+    let routeName = (k.name || '').trim();
+    let gradeLabel = '', gradeInt = 0, genre = '';
+    const gm = routeName.match(/\(([^)]+)\)\s*$/);
+    if (gm) {
+      const parsed = parseGradeToken(gm[1]);
+      if (parsed) {
+        gradeLabel = parsed.label; gradeInt = parsed.gi; genre = parsed.genre;
+        routeName = routeName.slice(0, gm.index).trim();
+      }
+    }
+    // description: "<name> (<grade>), <sector>, <crag>" — last segment is the crag.
+    const parts = (k.description || '').split(',').map(s => s.trim()).filter(Boolean);
+    const cragName = parts.length ? parts[parts.length - 1] : cragId;
+    return { key: `${cragId}/${routeId}`, cragId, routeName, gradeLabel, gradeInt, genre, cragName };
+  }
+
+  // Enrich arbitrary route keys (for dream/imported lists) with rating + ascents.
+  // Resolves each crag's area (fetching the crag page if we don't know it yet),
+  // then pulls the area routelist store. Each key is attempted once per session.
+  async function enrichRouteStats(keys) {
+    const want = new Set(keys.filter(Boolean));
+    if (!want.size) return;
+    const cache = (await get(ROUTE_STATS_KEY)) || { stats: {}, areas: {} };
+    cache.stats = cache.stats || {}; cache.areas = cache.areas || {};
+    state.routeStats = cache.stats;
+    const now = Date.now();
+
+    const pending = [...want].filter(k => !cache.stats[k] && !state.enrichTried.has(k));
+    if (!pending.length) return;
+    pending.forEach(k => state.enrichTried.add(k));
+
+    // 1) Resolve area param_ids for crags we haven't fetched.
+    const cragsNeedingPage = new Set();
+    for (const k of pending) {
+      const tot = state.cragTotals[k.split('/')[0]];
+      if (!(tot && tot.areaParamId)) cragsNeedingPage.add(k.split('/')[0]);
+    }
+    if (cragsNeedingPage.size) {
+      const totalsRaw = (await get(CRAG_TOTALS_KEY)) || {};
+      const ids = [...cragsNeedingPage];
+      setStatus(`Looking up ${ids.length} crag${ids.length > 1 ? 's' : ''}…`, true);
+      let i = 0;
+      const worker = async () => {
+        while (i < ids.length) {
+          const id = ids[i++];
+          const result = await fetchCragTotal(id);
+          if (result && (result.total > 0 || result.area)) {
+            const prev = totalsRaw[id] || {};
+            totalsRaw[id] = { ...prev, ...result, total: result.total > 0 ? result.total : prev.total, t: now };
+          }
+        }
+      };
+      await Promise.all(Array.from({ length: 4 }, worker));
+      await set(CRAG_TOTALS_KEY, totalsRaw);
+      state.cragTotals = totalsRaw;
+    }
+
+    // 2) Fetch each needed area store; index stats for the wanted keys.
+    const areaIds = new Set();
+    for (const k of pending) {
+      const tot = state.cragTotals[k.split('/')[0]];
+      if (tot && tot.areaParamId) areaIds.add(tot.areaParamId);
+    }
+    const stale = [...areaIds].filter(a => !cache.areas[a] || (now - cache.areas[a]) > ROUTE_STATS_TTL_MS);
+    if (stale.length) {
+      let done = 0;
+      setStatus(`Fetching route ratings (0/${stale.length} areas)…`, true);
+      for (const areaId of stale) {
+        const routes = await fetchAreaRoutes(areaId);
+        for (const rt of routes) {
+          const key = `${rt.crag_param_id || ''}/${rt.param_id || ''}`;
+          if (want.has(key)) {
+            cache.stats[key] = {
+              rating: parseFloat(rt.rating) || 0,
+              ascents: rt.ascents_done_count || 0,
+              gradeInt: rt.grade_int || 0,
+              genre: rt.genre || '',
+            };
+          }
+        }
+        cache.areas[areaId] = now;
+        done++;
+        setStatus(`Fetching route ratings (${done}/${stale.length} areas)…`, true);
+      }
+    }
+    await set(ROUTE_STATS_KEY, cache);
+    state.routeStats = cache.stats;
+    setStatus('', false);
+  }
+
   // ── State & rendering ─────────────────────────────────────────────
   const state = {
     user: '',
@@ -420,6 +530,7 @@
     activeGenreMonth: 'all', // 'all' | 'Boulder' | 'Sport' | 'Other'
     selectedCragId: null, // crag spotlight
     routeStats: {},       // routeKey → { rating, ascents, gradeInt, genre }
+    enrichTried: new Set(), // route keys we've already tried to enrich this session
     board: null,          // tier-list board (loaded from storage)
   };
 
@@ -724,9 +835,23 @@
   function defaultList(name) {
     return { id: genId(), name: name || 'My projects', genre: 'all', areas: null, gradeMin: null, gradeMax: null, tiers: {}, order: {}, notes: {} };
   }
+  // A "dream"/custom list isn't backed by your todos — you build it by searching
+  // and adding routes, which are stored on the list itself (like imported lists).
+  function defaultCustomList(name) {
+    const l = defaultList(name || 'Dream list');
+    l.custom = true;
+    l.items = [];
+    return l;
+  }
   function defaultBoard() {
     const l = defaultList('My projects');
     return { version: 2, lists: [l], activeListId: l.id };
+  }
+  // A list is "stored" (self-contained) when it carries its own item snapshot —
+  // true for both dream/custom lists and imported lists. Otherwise it's live
+  // over your todos.
+  function listIsStored(list) {
+    return Array.isArray(list.items);
   }
 
   let boardSaveTimer = null;
@@ -790,24 +915,34 @@
     });
   }
 
-  // The item pool for a list: imported lists carry their own snapshot; live
-  // lists draw from your todos. Filters (genre/area/grade) only apply to live.
+  // Decorate a stored item (dream/imported) with live area + stats lookups, so
+  // ratings/ascents fill in once enriched and area shows once the crag is known.
+  function decorateStored(it) {
+    const cragId = it.key.split('/')[0];
+    const tot = state.cragTotals[cragId] || {};
+    const stats = state.routeStats[it.key];
+    const s = stats || {};
+    const gradeInt = it.gradeInt || s.gradeInt || 0;
+    const genre = it.genre || s.genre || '';
+    return {
+      key: it.key,
+      routeName: it.routeName || '',
+      cragName: it.cragName || tot.name || cragId,
+      area: it.area || tot.area || '',
+      gradeLabel: it.gradeLabel || (gradeInt ? intToLabel(gradeInt, genre) : ''),
+      gradeInt,
+      bucket: bucketOf(genre),
+      rating: s.rating || it.rating || 0,
+      ascents: s.ascents || it.ascents || 0,
+      hasStats: !!stats || it.rating != null,
+    };
+  }
+
+  // The (filtered) item pool for a list: stored lists from their snapshot, live
+  // lists from your todos. Genre/area/grade filters apply to both.
   function listItems(list) {
-    if (list.imported && Array.isArray(list.items)) {
-      return list.items.map(it => ({
-        key: it.key,
-        routeName: it.routeName || '',
-        cragName: it.cragName || '',
-        area: it.area || '',
-        gradeLabel: it.gradeLabel || (it.gradeInt ? intToLabel(it.gradeInt, it.genre) : ''),
-        gradeInt: it.gradeInt || 0,
-        bucket: bucketOf(it.genre || ''),
-        rating: it.rating || 0,
-        ascents: it.ascents || 0,
-        hasStats: it.rating != null,
-      }));
-    }
-    return filterItems(boardItems(), list);
+    const items = listIsStored(list) ? list.items.map(decorateStored) : boardItems();
+    return filterItems(items, list);
   }
 
   function filterItems(items, list) {
@@ -865,10 +1000,16 @@
       btn.addEventListener('click', fn);
       el.appendChild(btn);
     };
-    mkBtn('+ New', 'Create a new list', () => {
-      const name = (prompt('Name for the new list:', 'New list') || '').trim();
+    mkBtn('+ New', 'New list from your todos', () => {
+      const name = (prompt('Name for the new todo list:', 'New list') || '').trim();
       if (!name) return;
       const l = defaultList(name);
+      b.lists.push(l); b.activeListId = l.id; saveBoard(); renderBoard();
+    });
+    mkBtn('+ Dream', 'New dream/trip list — add any routes by search', () => {
+      const name = (prompt('Name for the dream/trip list:', 'Dream list') || '').trim();
+      if (!name) return;
+      const l = defaultCustomList(name);
       b.lists.push(l); b.activeListId = l.id; saveBoard(); renderBoard();
     });
     mkBtn('Rename', 'Rename this list', () => {
@@ -890,10 +1031,12 @@
       b.activeListId = b.lists[0].id; saveBoard(); renderBoard();
     });
 
-    if (list.imported) {
+    if (list.imported || list.custom) {
       const tag = document.createElement('span');
       tag.className = 'mc-pb-imported';
-      tag.textContent = list.sourceUser ? `imported from ${list.sourceUser}` : 'imported';
+      tag.textContent = list.imported
+        ? (list.sourceUser ? `imported from ${list.sourceUser}` : 'imported')
+        : 'dream list';
       el.appendChild(tag);
     }
   }
@@ -980,47 +1123,65 @@
   }
 
   // ── Cards + tier rows ──
-  function cardHtml(it, note) {
+  function cardHtml(it, note, opts) {
+    opts = opts || {};
     const cragId = it.key.split('/')[0] || '';
     const routeHref = `https://thetopo.com/crags/${it.key.split('/').map(encodeURIComponent).join('/routes/')}`;
     const cragHref = `https://thetopo.com/crags/${encodeURIComponent(cragId)}`;
     const hasNote = !!note;
+    const markers = opts.markers
+      ? `${it.done ? '<span class="mk done" title="You\'ve sent this">✓ sent</span>' : ''}${it.onTodo ? '<span class="mk todo" title="On your todo list">todo</span>' : ''}`
+      : '';
+    const rm = opts.removable ? '<button class="rm" draggable="false" title="Remove from list">×</button>' : '';
     return `
       <div class="mc-tl-card" draggable="true" data-key="${escapeHtml(it.key)}">
         <span class="g">${escapeHtml(it.gradeLabel || '—')}</span>
         <a class="nm" href="${routeHref}" target="_blank" rel="noopener" draggable="false" title="Open route on thetopo">${escapeHtml(it.routeName || '(unnamed)')}</a>
+        ${markers}
         <span class="rt ${it.hasStats ? '' : 'unk'}" title="${it.hasStats ? it.rating.toFixed(1) + ' / 3' : 'rating not fetched'}">${starsHtml(it.rating)}</span>
         <span class="as" title="ascents logged">${it.hasStats ? it.ascents : '–'}</span>
         <span class="cr"><a href="${cragHref}" target="_blank" rel="noopener" draggable="false" title="Open crag on thetopo">${escapeHtml(it.cragName)}</a>${it.area ? ` · ${escapeHtml(it.area)}` : ''}</span>
         <button class="nb${hasNote ? ' has' : ''}" draggable="false" title="Notes">✎</button>
+        ${rm}
         <div class="nt" hidden><textarea placeholder="notes…">${escapeHtml(note || '')}</textarea></div>
       </div>`;
   }
 
+  // Full render: list selector, filters, search box, then the tier area.
   function renderBoard() {
     const card = $('#mc-pb-card');
     if (!card) return;
     if (!state.board) state.board = defaultBoard();
     const list = activeList();
-    const live = !list.imported;
-    const sourceItems = live ? boardItems() : listItems(list);
-
     card.hidden = false;
     renderListControls();
-    // Filters only make sense for live (todo-backed) lists.
-    const filtersEl = $('#mc-pb-filters');
-    if (live) {
-      filtersEl.hidden = false;
-      renderBoardGenreTabs(sourceItems, list);
-      renderBoardAreaChips(sourceItems, list);
-      renderBoardGrade(sourceItems, list);
-    } else {
-      filtersEl.hidden = true;
+    const allItems = listIsStored(list) ? list.items.map(decorateStored) : boardItems();
+    $('#mc-pb-filters').hidden = false;
+    renderBoardGenreTabs(allItems, list);
+    renderBoardAreaChips(allItems, list);
+    renderBoardGrade(allItems, list);
+    renderSearchBox(list);
+    renderTierArea(list);
+  }
+
+  // Renders just the tier rows + pool (cheap re-render after drag / add / remove,
+  // so the search box and controls keep their state).
+  function renderTierArea(list) {
+    const listEl = $('#mc-pb-list');
+    if (!listEl) return;
+    const stored = listIsStored(list);
+    const items = listItems(list);
+    const doneKeys = new Set(state.done.map(r => r.key));
+    const todoKeys = new Set(state.todo.map(r => r.key));
+    items.forEach(it => { it.done = doneKeys.has(it.key); it.onTodo = todoKeys.has(it.key); });
+
+    // Lazily fetch ratings/ascents for stored items we don't know yet.
+    if (stored) {
+      const missing = list.items.map(i => i.key).filter(k => !state.routeStats[k] && !state.enrichTried.has(k));
+      if (missing.length) enrichRouteStats(list.items.map(i => i.key)).then(() => renderTierArea(list));
     }
 
-    const items = live ? filterItems(sourceItems, list) : sourceItems;
-
-    // Bucket into tiers + unranked pool, ordered by per-list order index.
+    const opts = { markers: stored, removable: stored };
     const groups = { '': [] };
     for (const t of PB_TIERS) groups[t] = [];
     for (const it of items) {
@@ -1033,24 +1194,79 @@
     const tierRows = PB_TIERS.map(t => `
       <div class="mc-tl-row">
         <div class="mc-tl-label tier-${t}">${t}</div>
-        <div class="mc-tl-drop" data-tier="${t}">${groups[t].map(it => cardHtml(it, list.notes[it.key])).join('')}</div>
+        <div class="mc-tl-drop" data-tier="${t}">${groups[t].map(it => cardHtml(it, list.notes[it.key], opts)).join('')}</div>
       </div>`).join('');
     const pool = `
       <div class="mc-tl-pool">
         <div class="mc-tl-pool-h">Unranked <span class="n">${groups[''].length}</span></div>
-        <div class="mc-tl-drop mc-tl-pooldrop" data-tier="">${groups[''].map(it => cardHtml(it, list.notes[it.key])).join('') || '<div class="mc-tl-empty">Everything placed in tiers.</div>'}</div>
+        <div class="mc-tl-drop mc-tl-pooldrop" data-tier="">${groups[''].map(it => cardHtml(it, list.notes[it.key], opts)).join('') || '<div class="mc-tl-empty">Everything placed in tiers.</div>'}</div>
       </div>`;
 
-    const listEl = $('#mc-pb-list');
     if (!items.length) {
-      const msg = !live
-        ? 'This imported list is empty.'
-        : (sourceItems.length ? 'No todos match these filters.' : 'No todos yet — add some on thetopo, or Import a shared list above.');
+      const total = stored ? list.items.length : boardItems().length;
+      const msg = stored
+        ? (total ? 'No routes match these filters.' : 'No routes yet — search above to add some.')
+        : (total ? 'No todos match these filters.' : 'No todos yet — add some on thetopo, or make a Dream list above.');
       listEl.innerHTML = `<div class="mc-card-sub" style="padding:14px 16px;">${msg}</div>`;
       return;
     }
     listEl.innerHTML = tierRows + pool;
     listEl.querySelectorAll('.mc-tl-card .nt textarea').forEach(autoGrow);
+  }
+
+  // ── Search box (dream/stored lists only) ──
+  function renderSearchBox(list) {
+    const wrap = $('#mc-pb-search');
+    if (!wrap) return;
+    if (!listIsStored(list)) { wrap.hidden = true; wrap.innerHTML = ''; return; }
+    wrap.hidden = false;
+    wrap.innerHTML = `
+      <input type="search" class="mc-pb-search-input" placeholder="Search any route to add (e.g. Story of Two Worlds)…" autocomplete="off" />
+      <div class="mc-pb-search-results" hidden></div>`;
+    const input = wrap.querySelector('.mc-pb-search-input');
+    const results = wrap.querySelector('.mc-pb-search-results');
+    let timer = null, lastQ = '';
+    input.addEventListener('input', () => {
+      clearTimeout(timer);
+      const q = input.value.trim();
+      lastQ = q;
+      if (q.length < 2) { results.hidden = true; results.innerHTML = ''; return; }
+      results.hidden = false;
+      results.innerHTML = '<div class="mc-pb-sr-empty">Searching…</div>';
+      timer = setTimeout(async () => {
+        const matches = await searchRoutes(q);
+        if (lastQ !== q) return;
+        results._matches = matches;
+        renderSearchResults(results, list);
+      }, 300);
+    });
+    results.addEventListener('click', (e) => {
+      const btn = e.target.closest('.mc-pb-sr');
+      if (!btn || btn.disabled) return;
+      const m = (results._matches || []).find(x => x.key === btn.dataset.key);
+      if (!m) return;
+      if (!list.items.some(i => i.key === m.key)) {
+        list.items.push({ key: m.key, routeName: m.routeName, gradeLabel: m.gradeLabel, gradeInt: m.gradeInt, genre: m.genre, cragName: m.cragName });
+        saveBoard();
+        enrichRouteStats([m.key]).then(() => renderTierArea(list));
+        renderTierArea(list);
+        renderSearchResults(results, list);
+      }
+    });
+  }
+
+  function renderSearchResults(results, list) {
+    const matches = results._matches || [];
+    results.hidden = false;
+    if (!matches.length) { results.innerHTML = '<div class="mc-pb-sr-empty">No routes found.</div>'; return; }
+    const have = new Set(list.items.map(i => i.key));
+    results.innerHTML = matches.slice(0, 25).map(m => `
+      <button type="button" class="mc-pb-sr" data-key="${escapeHtml(m.key)}"${have.has(m.key) ? ' disabled' : ''}>
+        <span class="g">${escapeHtml(m.gradeLabel || '?')}</span>
+        <span class="nm">${escapeHtml(m.routeName || '(unnamed)')}</span>
+        <span class="cr">${escapeHtml(m.cragName || '')}</span>
+        <span class="${have.has(m.key) ? 'added' : 'add'}">${have.has(m.key) ? 'added' : '+ add'}</span>
+      </button>`).join('');
   }
 
   // Rebuild the active list's tier + order maps from the DOM after a drag.
@@ -1087,7 +1303,9 @@
 
   // ── Export / import shareable list JSON ──
   function exportList(list) {
-    const items = listItems(list);
+    // Export the whole list — stored lists in full, live lists as their current
+    // filtered view (that's the curated set the user sees).
+    const items = listIsStored(list) ? list.items.map(decorateStored) : filterItems(boardItems(), list);
     const out = {
       bettercrags_tierlist: 1,
       username: state.user || '',
@@ -1177,10 +1395,23 @@
       const dragging = root.querySelector('.mc-tl-card.dragging');
       if (dragging) dragging.classList.remove('dragging');
       commitBoardFromDom();
-      renderBoard();
+      renderTierArea(activeList());
     });
 
     root.addEventListener('click', (e) => {
+      const rm = e.target.closest('.rm');
+      if (rm) {
+        const cardEl = rm.closest('.mc-tl-card');
+        const key = cardEl && cardEl.dataset.key;
+        const list = activeList();
+        if (key && listIsStored(list)) {
+          list.items = list.items.filter(i => i.key !== key);
+          delete list.tiers[key]; delete list.order[key]; delete list.notes[key];
+          saveBoard();
+          renderTierArea(list);
+        }
+        return;
+      }
       const nb = e.target.closest('.nb');
       if (!nb) return;
       const cardEl = nb.closest('.mc-tl-card');

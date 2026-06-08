@@ -357,6 +357,49 @@ a:hover { color: #8fc7ff; text-decoration: underline; }
   resize: vertical; min-height: 24px; overflow: hidden;
 }
 .mc-tl-card .nt textarea::placeholder { color: var(--text-muted); }
+.mc-tl-card .mk {
+  font-size: 10px; text-transform: uppercase; letter-spacing: 0.04em;
+  border-radius: 4px; padding: 1px 5px;
+}
+.mc-tl-card .mk.done { background: rgba(64, 192, 96, 0.18); color: #3fbf60; }
+.mc-tl-card .mk.todo { background: var(--bg-elev-2); color: var(--text-muted); border: 1px solid var(--border-strong); }
+.mc-tl-card .rm {
+  background: transparent; border: none; color: var(--text-muted);
+  cursor: pointer; font-size: 15px; line-height: 1; padding: 0 2px;
+}
+.mc-tl-card .rm:hover { color: #e5484d; }
+
+/* Search-to-add (dream lists) */
+.mc-pb-search { padding: 10px 16px 0; position: relative; }
+.mc-pb-search[hidden] { display: none; }
+.mc-pb-search-input {
+  width: 100%; box-sizing: border-box;
+  background: var(--bg-elev-2); color: var(--text);
+  border: 1px solid var(--border-strong); border-radius: 8px;
+  padding: 8px 12px; font: inherit; font-size: 13px;
+}
+.mc-pb-search-input::placeholder { color: var(--text-muted); }
+.mc-pb-search-results {
+  margin-top: 4px;
+  background: var(--bg-elev-2);
+  border: 1px solid var(--border-strong); border-radius: 8px;
+  max-height: 320px; overflow-y: auto;
+}
+.mc-pb-sr-empty { padding: 10px 12px; color: var(--text-muted); font-size: 12px; }
+.mc-pb-sr {
+  display: flex; align-items: center; gap: 8px; width: 100%;
+  background: transparent; border: none; border-bottom: 1px solid var(--border);
+  padding: 7px 12px; font: inherit; font-size: 13px; color: var(--text);
+  cursor: pointer; text-align: left;
+}
+.mc-pb-sr:last-child { border-bottom: none; }
+.mc-pb-sr:hover:not(:disabled) { background: var(--bg-elev-3); }
+.mc-pb-sr:disabled { cursor: default; opacity: 0.7; }
+.mc-pb-sr .g { font-weight: 700; color: var(--text-strong); min-width: 36px; }
+.mc-pb-sr .nm { font-weight: 600; color: var(--text-strong); }
+.mc-pb-sr .cr { color: var(--text-muted); font-size: 12px; flex: 1; }
+.mc-pb-sr .add { color: var(--accent); font-size: 12px; font-weight: 600; }
+.mc-pb-sr .added { color: var(--text-muted); font-size: 11px; text-transform: uppercase; }
 
 .mc-table-wrap { padding: 0 0 6px; overflow-x: auto; }
 .mc-table {
