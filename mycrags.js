@@ -9,11 +9,11 @@
   const ASCENTS_CACHE_KEY = 'bc_mycrags_ascents_v1';
   const CRAG_FETCH_CACHE_KEY = 'bc_mycrags_crag_fetched_v4'; // v4: capture area param_id for routelist fetches
   const ROUTE_STATS_KEY = 'bc_route_stats_v1';  // routeKey → { rating, ascents, gradeInt, genre }
-  const BOARD_KEY = 'bc_project_board_v1';       // personal priority board: order, tiers, notes
+  const BOARD_KEY = 'bc_project_board_v2';       // tier-list board: named lists + global notes
+  const BOARD_KEY_V1 = 'bc_project_board_v1';    // legacy single-list board (migrated on load)
   const CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 1 day for ascents (cheap to refetch)
   const CRAG_PAGE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
   const ROUTE_STATS_TTL_MS = 7 * 24 * 60 * 60 * 1000;
-  const TIERS = ['', 'A', 'B', 'C'];
 
   // Grade tables mirror content.js. Font is upper-case letters, French lower-case.
   const FONT_GRADES = [
@@ -420,15 +420,8 @@
     activeGenreMonth: 'all', // 'all' | 'Boulder' | 'Sport' | 'Other'
     selectedCragId: null, // crag spotlight
     routeStats: {},       // routeKey → { rating, ascents, gradeInt, genre }
-    board: null,          // personal priority board (loaded from storage)
+    board: null,          // tier-list board (loaded from storage)
   };
-
-  // Default shape for the project board. order: priority sequence of route
-  // keys; tiers/notes keyed by route key; genre/areas are the active filters
-  // (areas null = show all).
-  function defaultBoard() {
-    return { order: [], tiers: {}, notes: {}, genre: 'all', areas: null };
-  }
 
   const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
@@ -693,16 +686,45 @@
     card.hidden = false;
   }
 
-  // ── Project board: prioritise todos with drag-drop, tiers & notes ──
+  // ── Tab navigation (Dashboard / To-do tierlists) ──
+  function initTabs() {
+    const tabs = document.querySelectorAll('.mc-tab');
+    if (!tabs.length) return;
+    let stored = 'dashboard';
+    try { stored = localStorage.getItem('bc_mc_tab') || 'dashboard'; } catch {}
+    const activate = (name) => {
+      tabs.forEach(t => { t.dataset.active = t.dataset.tab === name ? '1' : '0'; });
+      document.querySelectorAll('.mc-tab-panel').forEach(p => { p.hidden = p.id !== `mc-tab-${name}`; });
+      try { localStorage.setItem('bc_mc_tab', name); } catch {}
+    };
+    tabs.forEach(t => t.addEventListener('click', () => activate(t.dataset.tab)));
+    activate([...tabs].some(t => t.dataset.tab === stored) ? stored : 'dashboard');
+  }
+
+  // ── To-do tierlists: drag todos into S/A/B/C tiers, saved as lists ──
+  const PB_TIERS = ['S', 'A', 'B', 'C'];
+
   function bucketOf(genre) {
     return genre === 'Boulder' ? 'Boulder' : genre === 'Sport' ? 'Sport' : 'Other';
   }
-
   function starsHtml(rating) {
-    const full = Math.round(rating || 0);
     let s = '';
+    const full = Math.round(rating || 0);
     for (let i = 1; i <= 5; i++) s += i <= full ? '★' : '☆';
     return s;
+  }
+  function genId() {
+    return Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+  }
+  function slug(s) {
+    return String(s || 'list').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'list';
+  }
+  function defaultList(name) {
+    return { id: genId(), name: name || 'My projects', genre: 'all', areas: null, gradeMin: null, gradeMax: null, tiers: {}, order: {}, notes: {} };
+  }
+  function defaultBoard() {
+    const l = defaultList('My projects');
+    return { version: 2, lists: [l], activeListId: l.id };
   }
 
   let boardSaveTimer = null;
@@ -712,14 +734,38 @@
   }
 
   async function loadBoard() {
-    const saved = await get(BOARD_KEY);
-    state.board = Object.assign(defaultBoard(), saved || {});
-    state.board.order = state.board.order || [];
-    state.board.tiers = state.board.tiers || {};
-    state.board.notes = state.board.notes || {};
+    let b = await get(BOARD_KEY);
+    if (!b) {
+      // Migrate from the v1 single-list board if present.
+      b = defaultBoard();
+      const old = await get(BOARD_KEY_V1);
+      if (old) {
+        if (old.tiers) b.lists[0].tiers = old.tiers;
+        if (old.notes) b.lists[0].notes = old.notes;
+        if (old.genre) b.lists[0].genre = old.genre;
+        if (old.areas) b.lists[0].areas = old.areas;
+      }
+    }
+    if (!Array.isArray(b.lists) || !b.lists.length) b.lists = [defaultList('My projects')];
+    for (const l of b.lists) {
+      l.tiers = l.tiers || {};
+      l.order = l.order || {};
+      l.notes = l.notes || {};
+      if (!('genre' in l)) l.genre = 'all';
+      if (!('areas' in l)) l.areas = null;
+      if (!('gradeMin' in l)) l.gradeMin = null;
+      if (!('gradeMax' in l)) l.gradeMax = null;
+    }
+    if (!b.activeListId || !b.lists.some(l => l.id === b.activeListId)) b.activeListId = b.lists[0].id;
+    state.board = b;
   }
 
-  // Enriched todo rows: grade + genre + rating + ascents + area, ready to show.
+  function activeList() {
+    if (!state.board) state.board = defaultBoard();
+    return state.board.lists.find(l => l.id === state.board.activeListId) || state.board.lists[0];
+  }
+
+  // Items from the user's own todos, enriched with rating/ascents/area.
   function boardItems() {
     return state.todo.map(r => {
       const tot = state.cragTotals[r.cragId] || {};
@@ -729,7 +775,6 @@
       const gradeInt = r.gradeInt || s.gradeInt || 0;
       return {
         key: r.key,
-        cragId: r.cragId,
         routeName: r.routeName || '',
         cragName: r.cragName || tot.name || r.cragId,
         area: tot.area || '',
@@ -743,27 +788,37 @@
     });
   }
 
-  // Make sure every current todo key has a slot in the priority order, so drag
-  // reordering stays globally consistent even when filters hide some rows.
-  // New keys land at the end, pre-sorted hardest-then-best-rated.
-  function ensureBoardOrder(items) {
-    const inOrder = new Set(state.board.order);
-    const missing = items.filter(it => !inOrder.has(it.key));
-    if (missing.length) {
-      missing.sort((a, b) => (b.gradeInt - a.gradeInt) || (b.rating - a.rating));
-      state.board.order.push(...missing.map(it => it.key));
-      saveBoard();
+  // The item pool for a list: imported lists carry their own snapshot; live
+  // lists draw from your todos. Filters (genre/area/grade) only apply to live.
+  function listItems(list) {
+    if (list.imported && Array.isArray(list.items)) {
+      return list.items.map(it => ({
+        key: it.key,
+        routeName: it.routeName || '',
+        cragName: it.cragName || '',
+        area: it.area || '',
+        gradeLabel: it.gradeLabel || (it.gradeInt ? intToLabel(it.gradeInt, it.genre) : ''),
+        gradeInt: it.gradeInt || 0,
+        bucket: bucketOf(it.genre || ''),
+        rating: it.rating || 0,
+        ascents: it.ascents || 0,
+        hasStats: it.rating != null,
+      }));
     }
+    return filterItems(boardItems(), list);
   }
 
-  // Reorder the GLOBAL priority list from the new visible sequence: walk the
-  // global order and, wherever a visible key sat, drop in the next visible key
-  // — hidden items keep their slots.
-  function applyDragOrder(visibleOrder) {
-    const visibleSet = new Set(visibleOrder);
-    let vi = 0;
-    state.board.order = state.board.order.map(k => visibleSet.has(k) ? visibleOrder[vi++] : k);
-    saveBoard();
+  function filterItems(items, list) {
+    return items.filter(it => {
+      if (list.genre !== 'all' && it.bucket !== list.genre) return false;
+      if (list.areas && !list.areas.includes(it.area || '')) return false;
+      if (list.gradeMin != null || list.gradeMax != null) {
+        if (!it.gradeInt) return false; // unknown grade is excluded once a grade filter is set
+        if (list.gradeMin != null && it.gradeInt < list.gradeMin) return false;
+        if (list.gradeMax != null && it.gradeInt > list.gradeMax) return false;
+      }
+      return true;
+    });
   }
 
   function autoGrow(ta) {
@@ -771,7 +826,64 @@
     ta.style.height = Math.min(160, ta.scrollHeight) + 'px';
   }
 
-  function renderBoardGenreTabs(items, current) {
+  // ── Board controls (list selector, filters) ──
+  function renderListControls() {
+    const el = $('#mc-pb-lists');
+    const b = state.board;
+    const list = activeList();
+    el.innerHTML = '';
+    const sel = document.createElement('select');
+    sel.className = 'mc-pb-list-select';
+    for (const l of b.lists) {
+      const o = document.createElement('option');
+      o.value = l.id;
+      o.textContent = l.imported ? `📥 ${l.name}` : l.name;
+      if (l.id === b.activeListId) o.selected = true;
+      sel.appendChild(o);
+    }
+    sel.addEventListener('change', () => { b.activeListId = sel.value; saveBoard(); renderBoard(); });
+    el.appendChild(sel);
+
+    const mkBtn = (label, title, fn) => {
+      const btn = document.createElement('button');
+      btn.textContent = label; btn.title = title;
+      btn.addEventListener('click', fn);
+      el.appendChild(btn);
+    };
+    mkBtn('+ New', 'Create a new list', () => {
+      const name = (prompt('Name for the new list:', 'New list') || '').trim();
+      if (!name) return;
+      const l = defaultList(name);
+      b.lists.push(l); b.activeListId = l.id; saveBoard(); renderBoard();
+    });
+    mkBtn('Rename', 'Rename this list', () => {
+      const name = (prompt('Rename list:', list.name) || '').trim();
+      if (!name) return;
+      list.name = name; saveBoard(); renderBoard();
+    });
+    mkBtn('Duplicate', 'Duplicate this list', () => {
+      const copy = JSON.parse(JSON.stringify(list));
+      copy.id = genId(); copy.name = `${list.name} copy`;
+      b.lists.push(copy); b.activeListId = copy.id; saveBoard(); renderBoard();
+    });
+    mkBtn('Export', 'Download this list as a shareable JSON', () => exportList(list));
+    mkBtn('Import', 'Import a shared list JSON', () => $('#mc-pb-import').click());
+    mkBtn('Delete', 'Delete this list', () => {
+      if (b.lists.length <= 1) { alert('Keep at least one list.'); return; }
+      if (!confirm(`Delete list "${list.name}"?`)) return;
+      b.lists = b.lists.filter(x => x.id !== list.id);
+      b.activeListId = b.lists[0].id; saveBoard(); renderBoard();
+    });
+
+    if (list.imported) {
+      const tag = document.createElement('span');
+      tag.className = 'mc-pb-imported';
+      tag.textContent = list.sourceUser ? `imported from ${list.sourceUser}` : 'imported';
+      el.appendChild(tag);
+    }
+  }
+
+  function renderBoardGenreTabs(items, list) {
     const container = $('#mc-pb-genre-tabs');
     const present = new Set(items.map(it => it.bucket));
     const opts = ['all', ...['Boulder', 'Sport', 'Other'].filter(g => present.has(g))];
@@ -779,14 +891,15 @@
     for (const g of opts) {
       const btn = document.createElement('button');
       btn.textContent = g === 'all' ? 'All' : g;
-      if (g === current) btn.dataset.active = '1';
-      btn.addEventListener('click', () => { state.board.genre = g; saveBoard(); renderBoard(); });
+      if (g === (list.genre || 'all')) btn.dataset.active = '1';
+      btn.addEventListener('click', () => { list.genre = g; saveBoard(); renderBoard(); });
       container.appendChild(btn);
     }
   }
 
-  function renderBoardAreaChips(items, genre) {
+  function renderBoardAreaChips(items, list) {
     const container = $('#mc-pb-areas');
+    const genre = list.genre || 'all';
     const counts = new Map();
     for (const it of items) {
       if (genre !== 'all' && it.bucket !== genre) continue;
@@ -795,136 +908,306 @@
       e.count++; counts.set(a, e);
     }
     container.innerHTML = '';
-    if (counts.size <= 1) { state.board.areas = null; return; }
-    const sel = state.board.areas;
+    if (counts.size <= 1) return;
+    const seld = list.areas;
     const allBtn = document.createElement('button');
     allBtn.textContent = 'All areas';
-    if (!sel) allBtn.dataset.active = '1';
-    allBtn.addEventListener('click', () => { state.board.areas = null; saveBoard(); renderBoard(); });
+    if (!seld) allBtn.dataset.active = '1';
+    allBtn.addEventListener('click', () => { list.areas = null; saveBoard(); renderBoard(); });
     container.appendChild(allBtn);
     const ordered = [...counts.entries()].sort((a, b) => b[1].count - a[1].count || a[1].label.localeCompare(b[1].label));
     for (const [a, { label, count }] of ordered) {
       const btn = document.createElement('button');
       btn.textContent = `${label} (${count})`;
-      if (sel && sel.includes(a)) btn.dataset.active = '1';
+      if (seld && seld.includes(a)) btn.dataset.active = '1';
       btn.addEventListener('click', () => {
-        let s = Array.isArray(state.board.areas) ? [...state.board.areas] : [];
+        let s = Array.isArray(list.areas) ? [...list.areas] : [];
         s = s.includes(a) ? s.filter(x => x !== a) : [...s, a];
-        state.board.areas = s.length ? s : null;
+        list.areas = s.length ? s : null;
         saveBoard(); renderBoard();
       });
       container.appendChild(btn);
     }
   }
 
-  let boardWired = false;
-  function wireBoard() {
-    if (boardWired) return;
-    const list = $('#mc-pb-list');
-    if (!list) return;
-    boardWired = true;
+  function renderBoardGrade(items, list) {
+    const container = $('#mc-pb-grade');
+    const genre = list.genre || 'all';
+    const gis = [...new Set(items
+      .filter(it => genre === 'all' || it.bucket === genre)
+      .map(it => it.gradeInt).filter(g => g > 0))].sort((a, b) => a - b);
+    container.innerHTML = '';
+    if (gis.length < 2) return;
+    const labelGenre = genre === 'Sport' ? 'Sport' : 'Boulder';
+    const lbl = document.createElement('span');
+    lbl.className = 'lbl'; lbl.textContent = 'Grade';
+    container.appendChild(lbl);
+    const mkSel = (which, val) => {
+      const s = document.createElement('select');
+      const any = document.createElement('option'); any.value = ''; any.textContent = 'Any'; s.appendChild(any);
+      for (const gi of gis) {
+        const o = document.createElement('option'); o.value = String(gi);
+        o.textContent = intToLabel(gi, labelGenre);
+        if (val === gi) o.selected = true;
+        s.appendChild(o);
+      }
+      s.addEventListener('change', () => {
+        const v = s.value ? +s.value : null;
+        if (which === 'min') list.gradeMin = v; else list.gradeMax = v;
+        saveBoard(); renderBoard();
+      });
+      return s;
+    };
+    container.appendChild(mkSel('min', list.gradeMin));
+    const dash = document.createElement('span'); dash.textContent = '–'; dash.className = 'dash';
+    container.appendChild(dash);
+    container.appendChild(mkSel('max', list.gradeMax));
+  }
 
-    list.addEventListener('dragstart', (e) => {
-      const handle = e.target.closest('.mc-pb-drag');
-      if (!handle) { e.preventDefault(); return; }
-      const row = handle.closest('.mc-pb-row');
-      if (!row) return;
-      row.classList.add('dragging');
-      e.dataTransfer.effectAllowed = 'move';
-      try { e.dataTransfer.setData('text/plain', row.dataset.key); } catch {}
-      try { e.dataTransfer.setDragImage(row, 20, 20); } catch {}
-    });
-    list.addEventListener('dragover', (e) => {
-      const dragging = list.querySelector('.mc-pb-row.dragging');
-      if (!dragging) return;
-      e.preventDefault();
-      const row = e.target.closest('.mc-pb-row');
-      if (!row || row === dragging) return;
-      const rect = row.getBoundingClientRect();
-      const after = (e.clientY - rect.top) > rect.height / 2;
-      list.insertBefore(dragging, after ? row.nextSibling : row);
-    });
-    list.addEventListener('drop', (e) => e.preventDefault());
-    list.addEventListener('dragend', () => {
-      const dragging = list.querySelector('.mc-pb-row.dragging');
-      if (dragging) dragging.classList.remove('dragging');
-      applyDragOrder([...list.querySelectorAll('.mc-pb-row')].map(r => r.dataset.key));
-      renderBoard();
-    });
-
-    list.addEventListener('change', (e) => {
-      const sel = e.target.closest('.mc-pb-tier');
-      if (!sel) return;
-      const row = sel.closest('.mc-pb-row');
-      const key = row && row.dataset.key;
-      if (!key) return;
-      if (sel.value) state.board.tiers[key] = sel.value; else delete state.board.tiers[key];
-      row.className = `mc-pb-row${sel.value ? ` tier-${sel.value}` : ''}`;
-      saveBoard();
-    });
-    list.addEventListener('input', (e) => {
-      const ta = e.target.closest('.mc-pb-note');
-      if (!ta) return;
-      const row = ta.closest('.mc-pb-row');
-      const key = row && row.dataset.key;
-      if (!key) return;
-      if (ta.value) state.board.notes[key] = ta.value; else delete state.board.notes[key];
-      autoGrow(ta);
-      saveBoard();
-    });
+  // ── Cards + tier rows ──
+  function cardHtml(it, note) {
+    const routeHref = `https://thetopo.com/crags/${it.key.split('/').map(encodeURIComponent).join('/routes/')}`;
+    const hasNote = !!note;
+    return `
+      <div class="mc-tl-card" draggable="true" data-key="${escapeHtml(it.key)}">
+        <span class="g">${escapeHtml(it.gradeLabel || '—')}</span>
+        <span class="nm">${escapeHtml(it.routeName || '(unnamed)')}</span>
+        <span class="rt ${it.hasStats ? '' : 'unk'}" title="${it.hasStats ? it.rating.toFixed(1) + ' / 5' : 'rating not fetched'}">${starsHtml(it.rating)}</span>
+        <span class="as" title="ascents logged">${it.hasStats ? it.ascents : '–'}</span>
+        <span class="cr">${escapeHtml(it.cragName)}${it.area ? ` · ${escapeHtml(it.area)}` : ''}</span>
+        <a class="lk" href="${routeHref}" target="_blank" rel="noopener" draggable="false" title="Open on thetopo">↗</a>
+        <button class="nb${hasNote ? ' has' : ''}" draggable="false" title="Notes">✎</button>
+        <div class="nt" hidden><textarea placeholder="notes…">${escapeHtml(note || '')}</textarea></div>
+      </div>`;
   }
 
   function renderBoard() {
     const card = $('#mc-pb-card');
     if (!card) return;
     if (!state.board) state.board = defaultBoard();
-    const items = boardItems();
-    if (!items.length) { card.hidden = true; return; }
-    ensureBoardOrder(items);
-    const byKey = new Map(items.map(it => [it.key, it]));
-    const genre = state.board.genre || 'all';
-    renderBoardGenreTabs(items, genre);
-    renderBoardAreaChips(items, genre);
+    const list = activeList();
+    const live = !list.imported;
+    const sourceItems = live ? boardItems() : listItems(list);
 
-    const selAreas = state.board.areas;
-    const visible = state.board.order
-      .map(k => byKey.get(k))
-      .filter(Boolean)
-      .filter(it => genre === 'all' || it.bucket === genre)
-      .filter(it => !selAreas || selAreas.includes(it.area || ''));
+    card.hidden = false;
+    renderListControls();
+    // Filters only make sense for live (todo-backed) lists.
+    const filtersEl = $('#mc-pb-filters');
+    if (live) {
+      filtersEl.hidden = false;
+      renderBoardGenreTabs(sourceItems, list);
+      renderBoardAreaChips(sourceItems, list);
+      renderBoardGrade(sourceItems, list);
+    } else {
+      filtersEl.hidden = true;
+    }
 
-    const list = $('#mc-pb-list');
-    if (!visible.length) {
-      list.innerHTML = `<div class="mc-card-sub" style="padding:14px 16px;">No todos match these filters.</div>`;
-      card.hidden = false;
+    const items = live ? filterItems(sourceItems, list) : sourceItems;
+
+    // Bucket into tiers + unranked pool, ordered by per-list order index.
+    const groups = { '': [] };
+    for (const t of PB_TIERS) groups[t] = [];
+    for (const it of items) {
+      const t = list.tiers[it.key];
+      groups[PB_TIERS.includes(t) ? t : ''].push(it);
+    }
+    const ord = k => (list.order[k] == null ? 1e9 : list.order[k]);
+    for (const k of Object.keys(groups)) groups[k].sort((a, b) => ord(a.key) - ord(b.key));
+
+    const tierRows = PB_TIERS.map(t => `
+      <div class="mc-tl-row">
+        <div class="mc-tl-label tier-${t}">${t}</div>
+        <div class="mc-tl-drop" data-tier="${t}">${groups[t].map(it => cardHtml(it, list.notes[it.key])).join('')}</div>
+      </div>`).join('');
+    const pool = `
+      <div class="mc-tl-pool">
+        <div class="mc-tl-pool-h">Unranked <span class="n">${groups[''].length}</span></div>
+        <div class="mc-tl-drop mc-tl-pooldrop" data-tier="">${groups[''].map(it => cardHtml(it, list.notes[it.key])).join('') || '<div class="mc-tl-empty">Everything placed in tiers.</div>'}</div>
+      </div>`;
+
+    const listEl = $('#mc-pb-list');
+    if (!items.length) {
+      const msg = !live
+        ? 'This imported list is empty.'
+        : (sourceItems.length ? 'No todos match these filters.' : 'No todos yet — add some on thetopo, or Import a shared list above.');
+      listEl.innerHTML = `<div class="mc-card-sub" style="padding:14px 16px;">${msg}</div>`;
       return;
     }
-    list.innerHTML = visible.map((it, i) => {
-      const tier = state.board.tiers[it.key] || '';
-      const note = state.board.notes[it.key] || '';
-      const routeHref = `https://thetopo.com/crags/${it.key.split('/').map(encodeURIComponent).join('/routes/')}`;
-      const ratingTitle = it.hasStats ? `${it.rating.toFixed(1)} / 5` : 'rating not fetched yet';
-      return `
-        <div class="mc-pb-row${tier ? ` tier-${tier}` : ''}" data-key="${escapeHtml(it.key)}">
-          <span class="mc-pb-drag" draggable="true" title="Drag to reorder">⠿</span>
-          <span class="mc-pb-rank">${i + 1}</span>
-          <select class="mc-pb-tier" title="Priority tier">
-            ${TIERS.map(t => `<option value="${t}"${t === tier ? ' selected' : ''}>${t || '—'}</option>`).join('')}
-          </select>
-          <span class="mc-pb-grade">${escapeHtml(it.gradeLabel || '—')}</span>
-          <span class="mc-pb-genre">${escapeHtml(it.bucket)}</span>
-          <span class="mc-pb-rating ${it.hasStats ? '' : 'unk'}" title="${escapeHtml(ratingTitle)}">${starsHtml(it.rating)}</span>
-          <span class="mc-pb-ascents" title="ascents logged on thetopo">${it.hasStats ? it.ascents : '–'}<span class="lbl"> asc</span></span>
-          <span class="mc-pb-name">
-            <a href="${routeHref}" target="_blank" rel="noopener">${escapeHtml(it.routeName || '(unnamed)')}</a>
-            <span class="crag">· ${escapeHtml(it.cragName)}${it.area ? ` · ${escapeHtml(it.area)}` : ''}</span>
-          </span>
-          <textarea class="mc-pb-note" rows="1" placeholder="notes…">${escapeHtml(note)}</textarea>
-        </div>
-      `;
-    }).join('');
-    list.querySelectorAll('.mc-pb-note').forEach(autoGrow);
-    card.hidden = false;
+    listEl.innerHTML = tierRows + pool;
+    listEl.querySelectorAll('.mc-tl-card .nt textarea').forEach(autoGrow);
+  }
+
+  // Rebuild the active list's tier + order maps from the DOM after a drag.
+  // Hidden (filtered-out) items keep their existing placement.
+  function commitBoardFromDom() {
+    const list = activeList();
+    const tiers = { ...list.tiers };
+    const order = { ...list.order };
+    $('#mc-pb-list').querySelectorAll('.mc-tl-drop').forEach(zone => {
+      const tier = zone.getAttribute('data-tier') || '';
+      [...zone.querySelectorAll('.mc-tl-card')].forEach((cardEl, i) => {
+        const key = cardEl.dataset.key;
+        if (tier) tiers[key] = tier; else delete tiers[key];
+        order[key] = i;
+      });
+    });
+    list.tiers = tiers;
+    list.order = order;
+    saveBoard();
+  }
+
+  function dragAfterCard(zone, x, y) {
+    const cards = [...zone.querySelectorAll('.mc-tl-card:not(.dragging)')];
+    let closest = null, best = Infinity, before = false;
+    for (const c of cards) {
+      const r = c.getBoundingClientRect();
+      const cx = r.left + r.width / 2, cy = r.top + r.height / 2;
+      const d = Math.hypot(x - cx, y - cy);
+      if (d < best) { best = d; closest = c; before = x < cx; }
+    }
+    if (!closest) return null;
+    return before ? closest : closest.nextElementSibling;
+  }
+
+  // ── Export / import shareable list JSON ──
+  function exportList(list) {
+    const items = listItems(list);
+    const out = {
+      bettercrags_tierlist: 1,
+      username: state.user || '',
+      name: list.name,
+      exportedAt: Date.now(),
+      tiers: PB_TIERS,
+      items: items.map(it => ({
+        key: it.key,
+        routeName: it.routeName,
+        gradeLabel: it.gradeLabel,
+        gradeInt: it.gradeInt,
+        genre: it.bucket,
+        rating: it.rating,
+        ascents: it.ascents,
+        cragName: it.cragName,
+        area: it.area,
+        tier: list.tiers[it.key] || '',
+        order: list.order[it.key] == null ? null : list.order[it.key],
+        note: list.notes[it.key] || '',
+      })),
+    };
+    const blob = new Blob([JSON.stringify(out, null, 2)], { type: 'application/json' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `${slug(list.name)}.bettercrags.json`;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  }
+
+  function importListObject(obj) {
+    if (!obj || obj.bettercrags_tierlist == null || !Array.isArray(obj.items)) {
+      alert('That doesn\'t look like a BetterCrags tierlist file.');
+      return;
+    }
+    const l = defaultList(obj.name || 'Imported list');
+    l.imported = true;
+    l.sourceUser = obj.username || '';
+    l.items = obj.items.map(it => ({
+      key: it.key,
+      routeName: it.routeName || '',
+      cragName: it.cragName || '',
+      area: it.area || '',
+      gradeLabel: it.gradeLabel || '',
+      gradeInt: it.gradeInt || 0,
+      genre: it.genre || '',
+      rating: it.rating || 0,
+      ascents: it.ascents || 0,
+    }));
+    for (const it of obj.items) {
+      if (it.tier) l.tiers[it.key] = it.tier;
+      if (it.order != null) l.order[it.key] = it.order;
+      if (it.note) l.notes[it.key] = it.note;
+    }
+    state.board.lists.push(l);
+    state.board.activeListId = l.id;
+    saveBoard();
+    renderBoard();
+    setStatus(`Imported list "${l.name}"${l.sourceUser ? ` from ${l.sourceUser}` : ''} (${l.items.length} routes).`, false);
+  }
+
+  let boardWired = false;
+  function wireBoard() {
+    if (boardWired) return;
+    const root = $('#mc-pb-list');
+    if (!root) return;
+    boardWired = true;
+
+    root.addEventListener('dragstart', (e) => {
+      const cardEl = e.target.closest('.mc-tl-card');
+      if (!cardEl || e.target.closest('textarea, a, button')) { e.preventDefault(); return; }
+      cardEl.classList.add('dragging');
+      e.dataTransfer.effectAllowed = 'move';
+      try { e.dataTransfer.setData('text/plain', cardEl.dataset.key); } catch {}
+    });
+    root.addEventListener('dragover', (e) => {
+      const dragging = root.querySelector('.mc-tl-card.dragging');
+      if (!dragging) return;
+      const zone = e.target.closest('.mc-tl-drop');
+      if (!zone) return;
+      e.preventDefault();
+      const after = dragAfterCard(zone, e.clientX, e.clientY);
+      if (after == null) zone.appendChild(dragging);
+      else zone.insertBefore(dragging, after);
+    });
+    root.addEventListener('drop', (e) => e.preventDefault());
+    root.addEventListener('dragend', () => {
+      const dragging = root.querySelector('.mc-tl-card.dragging');
+      if (dragging) dragging.classList.remove('dragging');
+      commitBoardFromDom();
+      renderBoard();
+    });
+
+    root.addEventListener('click', (e) => {
+      const nb = e.target.closest('.nb');
+      if (!nb) return;
+      const cardEl = nb.closest('.mc-tl-card');
+      const nt = cardEl.querySelector('.nt');
+      nt.hidden = !nt.hidden;
+      if (!nt.hidden) { const ta = nt.querySelector('textarea'); autoGrow(ta); ta.focus(); }
+    });
+    root.addEventListener('input', (e) => {
+      const ta = e.target.closest('.nt textarea');
+      if (!ta) return;
+      const cardEl = ta.closest('.mc-tl-card');
+      const key = cardEl && cardEl.dataset.key;
+      if (!key) return;
+      const list = activeList();
+      if (ta.value) list.notes[key] = ta.value; else delete list.notes[key];
+      cardEl.querySelector('.nb').classList.toggle('has', !!ta.value);
+      autoGrow(ta);
+      saveBoard();
+    });
+    // Disable dragging while a note is being edited.
+    root.addEventListener('focusin', (e) => {
+      const cardEl = e.target.closest('.mc-tl-card');
+      if (cardEl && e.target.closest('textarea')) cardEl.setAttribute('draggable', 'false');
+    });
+    root.addEventListener('focusout', (e) => {
+      const cardEl = e.target.closest('.mc-tl-card');
+      if (cardEl) cardEl.setAttribute('draggable', 'true');
+    });
+
+    const fileInput = $('#mc-pb-import');
+    if (fileInput) {
+      fileInput.addEventListener('change', () => {
+        const file = fileInput.files && fileInput.files[0];
+        if (!file) return;
+        const reader = new FileReader();
+        reader.onload = () => {
+          try { importListObject(JSON.parse(reader.result)); }
+          catch { alert('Could not read that file as JSON.'); }
+          fileInput.value = '';
+        };
+        reader.readAsText(file);
+      });
+    }
   }
 
   // ── Render: crags table ───────────────────────────────────────────
@@ -1653,6 +1936,7 @@
       updateCacheInfo();
     });
     wireBoard();
+    initTabs();
     $('#mc-user-input').addEventListener('keydown', (e) => {
       if (e.key === 'Enter') $('#mc-refresh').click();
     });
