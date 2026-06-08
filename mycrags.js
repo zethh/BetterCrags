@@ -707,10 +707,12 @@
   function bucketOf(genre) {
     return genre === 'Boulder' ? 'Boulder' : genre === 'Sport' ? 'Sport' : 'Other';
   }
+  // thetopo rates routes out of 3 stars (not 5).
+  const MAX_STARS = 3;
   function starsHtml(rating) {
     let s = '';
     const full = Math.round(rating || 0);
-    for (let i = 1; i <= 5; i++) s += i <= full ? '★' : '☆';
+    for (let i = 1; i <= MAX_STARS; i++) s += i <= full ? '★' : '☆';
     return s;
   }
   function genId() {
@@ -972,7 +974,7 @@
       <div class="mc-tl-card" draggable="true" data-key="${escapeHtml(it.key)}">
         <span class="g">${escapeHtml(it.gradeLabel || '—')}</span>
         <span class="nm">${escapeHtml(it.routeName || '(unnamed)')}</span>
-        <span class="rt ${it.hasStats ? '' : 'unk'}" title="${it.hasStats ? it.rating.toFixed(1) + ' / 5' : 'rating not fetched'}">${starsHtml(it.rating)}</span>
+        <span class="rt ${it.hasStats ? '' : 'unk'}" title="${it.hasStats ? it.rating.toFixed(1) + ' / 3' : 'rating not fetched'}">${starsHtml(it.rating)}</span>
         <span class="as" title="ascents logged">${it.hasStats ? it.ascents : '–'}</span>
         <span class="cr">${escapeHtml(it.cragName)}${it.area ? ` · ${escapeHtml(it.area)}` : ''}</span>
         <a class="lk" href="${routeHref}" target="_blank" rel="noopener" draggable="false" title="Open on thetopo">↗</a>
