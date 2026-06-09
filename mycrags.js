@@ -2318,7 +2318,7 @@
       state.done = cached.done || [];
       state.todo = cached.todo || [];
       setStatus(`Loaded ${state.done.length} sends and ${state.todo.length} todos from cache.`, false);
-      return;
+      return true; // served from cache — caller may want a background freshness check
     }
     setStatus('Fetching your ascents…', true);
     const [done, todo] = await Promise.all([
@@ -2329,14 +2329,38 @@
     state.todo = todo;
     await set(ASCENTS_CACHE_KEY, { user, t: Date.now(), done, todo });
     setStatus(`Fetched ${done.length} sends and ${todo.length} todos.`, false);
+    return false;
+  }
+
+  // After a cached load, quietly re-fetch the todo list so todos added on
+  // thetopo since the cache was written show up (in each matching live list's
+  // Unranked pool) without a manual Refresh. Todos-only keeps it cheap. Skips
+  // the re-render if you're mid-interaction in the tierlist.
+  async function backgroundRefreshTodos(user) {
+    let todo;
+    try { todo = await fetchUserList(user, 'todo'); } catch { return; }
+    const before = new Set(state.todo.map(r => r.key));
+    const changed = todo.length !== state.todo.length || todo.some(r => !before.has(r.key));
+    if (!changed) return;
+    state.todo = todo;
+    const cached = (await get(ASCENTS_CACHE_KEY)) || {};
+    await set(ASCENTS_CACHE_KEY, { user, t: cached.t || Date.now(), done: state.done, todo });
+    aggregate();
+    await fillMissingCragTotals();
+    await enrichTodoStats(false);
+    // Don't yank the UI out from under an active edit/drag/search.
+    const card = $('#mc-pb-card');
+    if (card && card.contains(document.activeElement)) { renderActivity(); renderNext(); renderCrags(); return; }
+    renderAll();
   }
 
   async function loadAllForUser(user, useCache) {
     state.user = user;
     state.cragTotals = (await get(CRAG_TOTALS_KEY)) || {};
     await loadBoard();
+    let servedFromCache = false;
     try {
-      await loadAscents(useCache, user);
+      servedFromCache = await loadAscents(useCache, user);
     } catch (err) {
       setStatus(`Couldn't fetch ascents: ${err && err.message || err}. Make sure you're logged in to thetopo.com.`, false, true);
       return;
@@ -2358,6 +2382,9 @@
     await enrichTodoStats(!useCache);
     renderAll();
     setStatus(`Showing ${state.done.length} sends · ${state.todo.length} todos · ${state.cragsAggregated.size} crags.`, false);
+
+    // Quietly pick up todos added on thetopo since the cache was written.
+    if (servedFromCache) backgroundRefreshTodos(user);
   }
 
   async function init() {
