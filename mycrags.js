@@ -15,29 +15,8 @@
   const CRAG_PAGE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
   const ROUTE_STATS_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
-  // Grade tables mirror content.js. Font is upper-case letters, French lower-case.
-  const FONT_GRADES = [
-    [100, '3'], [200, '4'], [300, '5'], [350, '5+'],
-    [400, '6A'], [450, '6A+'], [500, '6B'], [550, '6B+'],
-    [600, '6C'], [650, '6C+'],
-    [700, '7A'], [750, '7A+'], [800, '7B'], [850, '7B+'],
-    [900, '7C'], [950, '7C+'],
-    [1000, '8A'], [1050, '8A+'], [1100, '8B'], [1150, '8B+'],
-    [1200, '8C'], [1250, '8C+'],
-    [1300, '9A'], [1350, '9A+'], [1400, '9B'], [1450, '9B+'],
-    [1500, '9C'],
-  ];
-  const FRENCH_GRADES = [
-    [100, '3'], [200, '4a'], [300, '4c'], [350, '5a'],
-    [400, '5c'], [450, '6a'], [500, '6a+'], [550, '6b'],
-    [600, '6b+'], [650, '6c'],
-    [700, '6c+'], [750, '7a'], [800, '7a+'], [850, '7b'],
-    [900, '7b+'], [950, '7c'],
-    [1000, '7c+'], [1050, '8a'], [1100, '8a+'], [1150, '8b'],
-    [1200, '8b+'], [1250, '8c'],
-    [1300, '8c+'], [1350, '9a'], [1400, '9a+'], [1450, '9b'],
-    [1500, '9c'],
-  ];
+  // Grade tables + escapeHtml live in shared.js (loaded by mycrags.html first).
+  const { FONT_GRADES, FRENCH_GRADES, escapeHtml } = window.BCShared;
   const FONT_LABEL_TO_INT = new Map(FONT_GRADES.map(([v, l]) => [l, v]));
   const FRENCH_LABEL_TO_INT = new Map(FRENCH_GRADES.map(([v, l]) => [l, v]));
   const FONT_INT_TO_LABEL = new Map(FONT_GRADES.map(([v, l]) => [v, l]));
@@ -116,21 +95,53 @@
   // ── Storage helpers ───────────────────────────────────────────────
   function get(key) {
     return new Promise((resolve) => {
-      try { chrome.storage.local.get(key, (o) => resolve((o && o[key]) || null)); }
+      try {
+        chrome.storage.local.get(key, (o) => {
+          if (chrome.runtime.lastError) {
+            console.warn('BetterCrags: storage.get failed:', chrome.runtime.lastError.message);
+            resolve(null);
+            return;
+          }
+          resolve((o && o[key]) || null);
+        });
+      }
       catch { resolve(null); }
     });
   }
   function set(key, val) {
     return new Promise((resolve) => {
-      try { chrome.storage.local.set({ [key]: val }, () => resolve()); }
+      try {
+        chrome.storage.local.set({ [key]: val }, () => {
+          if (chrome.runtime.lastError) {
+            console.warn('BetterCrags: storage.set failed:', chrome.runtime.lastError.message);
+          }
+          resolve();
+        });
+      }
       catch { resolve(); }
     });
   }
   function remove(keys) {
     return new Promise((resolve) => {
-      try { chrome.storage.local.remove(keys, () => resolve()); }
+      try {
+        chrome.storage.local.remove(keys, () => {
+          if (chrome.runtime.lastError) {
+            console.warn('BetterCrags: storage.remove failed:', chrome.runtime.lastError.message);
+          }
+          resolve();
+        });
+      }
       catch { resolve(); }
     });
+  }
+
+  // Serialize read-modify-write merges of shared cache keys (route stats,
+  // crag totals) so concurrent triggers can't interleave and lose updates.
+  let storageChain = Promise.resolve();
+  function serialized(fn) {
+    const p = storageChain.then(fn, fn);
+    storageChain = p.then(() => {}, () => {});
+    return p;
   }
 
   // ── Fetching ──────────────────────────────────────────────────────
@@ -268,16 +279,23 @@
     const rows = parseAscentRows(doc0);
     const maxPage = maxPageInPager(doc0);
     if (maxPage > 0) {
-      const pageRows = await Promise.all(
-        Array.from({ length: maxPage }, (_, i) => i + 1).map(async (p) => {
+      // Bounded fan-out — same ~4-worker pattern as the crag-totals fetches.
+      const pageRows = new Array(maxPage);
+      let next = 0, completed = 0;
+      const worker = async () => {
+        while (next < maxPage) {
+          const idx = next++;
+          const p = idx + 1;
           try {
             const u = `${base}?page=${p}`;
             const d = await fetchHtml(u);
-            if (onProgress) onProgress(`Fetching ${kind} (page ${p + 1} of ${maxPage + 1})…`);
-            return parseAscentRows(d);
-          } catch { return []; }
-        })
-      );
+            pageRows[idx] = parseAscentRows(d);
+          } catch { pageRows[idx] = []; }
+          completed++;
+          if (onProgress) onProgress(`Fetching ${kind} (${completed + 1} of ${maxPage + 1} pages)…`);
+        }
+      };
+      await Promise.all(Array.from({ length: 4 }, worker));
       for (const batch of pageRows) rows.push(...batch);
     }
     return dedupeKeepEarliest(rows);
@@ -364,7 +382,10 @@
   // Pull rating + ascent counts for every todo route by fetching each area
   // (that has todos) once and indexing the routes we care about. Cached per
   // area with a TTL so repeat opens are instant.
-  async function enrichTodoStats(force) {
+  function enrichTodoStats(force) {
+    return serialized(() => enrichTodoStatsNow(force));
+  }
+  async function enrichTodoStatsNow(force) {
     const myKeys = new Set(state.todo.map(r => r.key));
     if (!myKeys.size) { state.routeStats = {}; return; }
     const cache = (await get(ROUTE_STATS_KEY)) || { stats: {}, areas: {} };
@@ -490,7 +511,10 @@
   // Enrich arbitrary route keys (for dream/imported lists) with rating + ascents.
   // Resolves each crag's area (fetching the crag page if we don't know it yet),
   // then pulls the area routelist store. Each key is attempted once per session.
-  async function enrichRouteStats(keys) {
+  function enrichRouteStats(keys) {
+    return serialized(() => enrichRouteStatsNow(keys));
+  }
+  async function enrichRouteStatsNow(keys) {
     const want = new Set(keys.filter(Boolean));
     if (!want.size) return;
     const cache = (await get(ROUTE_STATS_KEY)) || { stats: {}, areas: {} };
@@ -582,6 +606,11 @@
     board: null,          // tier-list board (loaded from storage)
   };
 
+  // Render-generation token: bumped on every user-triggered (re)load so slower
+  // async paths from an earlier trigger can detect they're stale and not paint
+  // old data over newer state.
+  let renderGen = 0;
+
   const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
   const $ = (sel) => document.querySelector(sel);
@@ -612,7 +641,8 @@
   function aggregate() {
     // Build per-crag aggregation including a "firsts" map per genre.
     const crags = new Map();
-    function get(id) {
+    // NB: named getCrag (not get) so it doesn't shadow the storage helper.
+    function getCrag(id) {
       if (!crags.has(id)) {
         crags.set(id, {
           id,
@@ -630,17 +660,17 @@
       return crags.get(id);
     }
     for (const r of state.done) {
-      const c = get(r.cragId);
+      const c = getCrag(r.cragId);
       c.done.push(r);
       if (r.cragName && !c.name) c.name = r.cragName;
     }
     for (const r of state.todo) {
-      const c = get(r.cragId);
+      const c = getCrag(r.cragId);
       c.todo.push(r);
       if (r.cragName && !c.name) c.name = r.cragName;
     }
     for (const [id, totals] of Object.entries(state.cragTotals)) {
-      const c = get(id);
+      const c = getCrag(id);
       if (totals && totals.total != null) c.total = totals.total;
       if (totals && totals.byGenre) c.totalsByGenre = totals.byGenre;
       if (totals && totals.byGrade) c.totalsByGrade = totals.byGrade;
@@ -752,11 +782,6 @@
     el.hidden = false;
   }
 
-  function escapeHtml(s) {
-    return String(s == null ? '' : s).replace(/[&<>"']/g, c =>
-      ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-  }
-
   // ── Render: where to go next ──────────────────────────────────────
   // Score = (open todos in genre) * (1 + ln(1 + done_at_crag_in_genre)) — favours
   // crags where you have an active project list AND some history, but doesn't
@@ -831,7 +856,7 @@
         : '';
       return `
         <div class="mc-next-item">
-          <div class="n"><a href="https://thetopo.com/crags/${escapeHtml(c.id)}" target="_blank" rel="noopener">${escapeHtml(name)}</a>${c.area ? `<span class="area">${escapeHtml(c.area)}</span>` : ''}</div>
+          <div class="n"><a href="https://thetopo.com/crags/${escapeHtml(encodeURIComponent(c.id))}" target="_blank" rel="noopener">${escapeHtml(name)}</a>${c.area ? `<span class="area">${escapeHtml(c.area)}</span>` : ''}</div>
           <div class="b">
             <span class="pill">${todos.length} todo</span>
             <span class="pill">${doneAtCrag} done${totalKnown ? ` / ${c.total}` : ''}</span>
@@ -903,10 +928,29 @@
   }
 
   let boardSaveTimer = null;
+  // Serialized form of the last value this tab wrote, so the storage.onChanged
+  // echo of our own save can be ignored even if state.board has moved on since.
+  let lastBoardWrite = null;
+  function writeBoard() {
+    lastBoardWrite = JSON.stringify(state.board);
+    set(BOARD_KEY, state.board);
+  }
   function saveBoard() {
     if (boardSaveTimer) clearTimeout(boardSaveTimer);
-    boardSaveTimer = setTimeout(() => { set(BOARD_KEY, state.board); boardSaveTimer = null; }, 250);
+    boardSaveTimer = setTimeout(() => { writeBoard(); boardSaveTimer = null; }, 250);
   }
+  // If the tab closes/hides before the debounce fires, persist immediately so
+  // the pending edit isn't lost.
+  function flushBoardSave() {
+    if (!boardSaveTimer) return;
+    clearTimeout(boardSaveTimer);
+    boardSaveTimer = null;
+    writeBoard();
+  }
+  window.addEventListener('pagehide', flushBoardSave);
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden') flushBoardSave();
+  });
 
   async function loadBoard() {
     let b = await get(BOARD_KEY);
@@ -966,22 +1010,26 @@
   // Decorate a stored item (dream/imported) with live area + stats lookups, so
   // ratings/ascents fill in once enriched and area shows once the crag is known.
   function decorateStored(it) {
-    const cragId = it.key.split('/')[0];
+    // Defensive against malformed/legacy stored items: coerce key to a string
+    // and numbers to numbers so bad storage can't crash the render.
+    const key = String((it && it.key) || '');
+    it = it || {};
+    const cragId = key.split('/')[0];
     const tot = state.cragTotals[cragId] || {};
-    const stats = state.routeStats[it.key];
+    const stats = state.routeStats[key];
     const s = stats || {};
-    const gradeInt = it.gradeInt || s.gradeInt || 0;
+    const gradeInt = Number(it.gradeInt || s.gradeInt) || 0;
     const genre = it.genre || s.genre || '';
     return {
-      key: it.key,
+      key,
       routeName: it.routeName || '',
       cragName: it.cragName || tot.name || cragId,
       area: it.area || tot.area || '',
       gradeLabel: it.gradeLabel || (gradeInt ? intToLabel(gradeInt, genre) : ''),
       gradeInt,
       bucket: bucketOf(genre),
-      rating: s.rating || it.rating || 0,
-      ascents: s.ascents || it.ascents || 0,
+      rating: Number(s.rating || it.rating) || 0,
+      ascents: Number(s.ascents || it.ascents) || 0,
       hasStats: !!stats || it.rating != null,
     };
   }
@@ -1173,8 +1221,14 @@
   // ── Cards + tier rows ──
   function cardHtml(it, note, opts) {
     opts = opts || {};
-    const cragId = it.key.split('/')[0] || '';
-    const routeHref = `https://thetopo.com/crags/${it.key.split('/').map(encodeURIComponent).join('/routes/')}`;
+    // Coerce everything that came from storage/import — stored items can carry
+    // attacker-controlled strings (imported JSON) or corrupt values, so nothing
+    // reaches the markup unescaped or un-coerced.
+    const key = String(it.key || '');
+    const cragId = key.split('/')[0] || '';
+    const rating = Number(it.rating) || 0;
+    const ascents = Number(it.ascents) || 0;
+    const routeHref = `https://thetopo.com/crags/${key.split('/').map(encodeURIComponent).join('/routes/')}`;
     const cragHref = `https://thetopo.com/crags/${encodeURIComponent(cragId)}`;
     const hasNote = !!note;
     const markers = opts.markers
@@ -1182,13 +1236,13 @@
       : '';
     const rm = opts.removable ? '<button class="rm" draggable="false" title="Remove from list">×</button>' : '';
     return `
-      <div class="mc-tl-card" draggable="true" data-key="${escapeHtml(it.key)}">
+      <div class="mc-tl-card" draggable="true" data-key="${escapeHtml(key)}">
         <span class="g">${escapeHtml(it.gradeLabel || '—')}</span>
-        <a class="nm" href="${routeHref}" target="_blank" rel="noopener" draggable="false" title="Open route on thetopo">${escapeHtml(it.routeName || '(unnamed)')}</a>
+        <a class="nm" href="${escapeHtml(routeHref)}" target="_blank" rel="noopener" draggable="false" title="Open route on thetopo">${escapeHtml(it.routeName || '(unnamed)')}</a>
         ${markers}
-        <span class="rt ${it.hasStats ? '' : 'unk'}" title="${it.hasStats ? it.rating.toFixed(1) + ' / 3' : 'rating not fetched'}">${starsHtml(it.rating)}</span>
-        <span class="as" title="ascents logged">${it.hasStats ? it.ascents : '–'}</span>
-        <span class="cr"><a href="${cragHref}" target="_blank" rel="noopener" draggable="false" title="Open crag on thetopo">${escapeHtml(it.cragName)}</a>${it.area ? ` · ${escapeHtml(it.area)}` : ''}</span>
+        <span class="rt ${it.hasStats ? '' : 'unk'}" title="${it.hasStats ? rating.toFixed(1) + ' / 3' : 'rating not fetched'}">${starsHtml(rating)}</span>
+        <span class="as" title="ascents logged">${it.hasStats ? ascents : '–'}</span>
+        <span class="cr"><a href="${escapeHtml(cragHref)}" target="_blank" rel="noopener" draggable="false" title="Open crag on thetopo">${escapeHtml(it.cragName)}</a>${it.area ? ` · ${escapeHtml(it.area)}` : ''}</span>
         <button class="nb${hasNote ? ' has' : ''}" draggable="false" title="Notes">✎</button>
         ${rm}
         <div class="nt" hidden><textarea placeholder="notes…">${escapeHtml(note || '')}</textarea></div>
@@ -1226,7 +1280,13 @@
     // Lazily fetch ratings/ascents for stored items we don't know yet.
     if (stored) {
       const missing = list.items.map(i => i.key).filter(k => !state.routeStats[k] && !state.enrichTried.has(k));
-      if (missing.length) enrichRouteStats(list.items.map(i => i.key)).then(() => renderTierArea(list));
+      if (missing.length) {
+        const gen = renderGen;
+        enrichRouteStats(list.items.map(i => i.key)).then(() => {
+          // Stale-result guard: skip if a newer load started or the list changed.
+          if (gen === renderGen && activeList() === list) renderTierArea(list);
+        });
+      }
     }
 
     const opts = { markers: stored, removable: stored };
@@ -1269,7 +1329,12 @@
     if (list.items.some(i => i.key === m.key)) return;
     list.items.push({ key: m.key, routeName: m.routeName, gradeLabel: m.gradeLabel, gradeInt: m.gradeInt, genre: m.genre, cragName: m.cragName, area: m.area || '' });
     saveBoard();
-    if (!state.routeStats[m.key]) enrichRouteStats([m.key]).then(() => renderTierArea(list));
+    if (!state.routeStats[m.key]) {
+      const gen = renderGen;
+      enrichRouteStats([m.key]).then(() => {
+        if (gen === renderGen && activeList() === list) renderTierArea(list);
+      });
+    }
     renderTierArea(list);
     if (after) after();
   }
@@ -1475,6 +1540,8 @@
         order[key] = i;
       });
     });
+    // Only persist when the placement actually changed.
+    if (JSON.stringify({ tiers, order }) === JSON.stringify({ tiers: list.tiers, order: list.order })) return;
     list.tiers = tiers;
     list.order = order;
     saveBoard();
@@ -1532,24 +1599,33 @@
       alert('That doesn\'t look like a BetterCrags tierlist file.');
       return;
     }
-    const l = defaultList(obj.name || 'Imported list');
+    const l = defaultList(String(obj.name || 'Imported list'));
     l.imported = true;
-    l.sourceUser = obj.username || '';
-    l.items = obj.items.map(it => ({
-      key: it.key,
-      routeName: it.routeName || '',
-      cragName: it.cragName || '',
-      area: it.area || '',
-      gradeLabel: it.gradeLabel || '',
-      gradeInt: it.gradeInt || 0,
-      genre: it.genre || '',
-      rating: it.rating || 0,
-      ascents: it.ascents || 0,
-    }));
+    l.sourceUser = String(obj.username || '');
+    // Validate/sanitize every imported item: the file is untrusted JSON, so
+    // require a usable key, coerce numbers to numbers and text to strings,
+    // and drop anything malformed rather than persisting it.
+    l.items = [];
+    const seenKeys = new Set();
     for (const it of obj.items) {
-      if (it.tier) l.tiers[it.key] = it.tier;
-      if (it.order != null) l.order[it.key] = it.order;
-      if (it.note) l.notes[it.key] = it.note;
+      if (!it || typeof it !== 'object') continue;
+      const key = typeof it.key === 'string' ? it.key.trim() : '';
+      if (!key || !key.includes('/') || seenKeys.has(key)) continue;
+      seenKeys.add(key);
+      l.items.push({
+        key,
+        routeName: String(it.routeName || ''),
+        cragName: String(it.cragName || ''),
+        area: String(it.area || ''),
+        gradeLabel: String(it.gradeLabel || ''),
+        gradeInt: Number(it.gradeInt) || 0,
+        genre: String(it.genre || ''),
+        rating: Number(it.rating) || 0,
+        ascents: Number(it.ascents) || 0,
+      });
+      if (typeof it.tier === 'string' && PB_TIERS.includes(it.tier)) l.tiers[key] = it.tier;
+      if (it.order != null && !isNaN(Number(it.order))) l.order[key] = Number(it.order);
+      if (it.note) l.notes[key] = String(it.note);
     }
     state.board.lists.push(l);
     state.board.activeListId = l.id;
@@ -1566,9 +1642,11 @@
     if (!root) return;
     boardWired = true;
 
+    let dragDropped = false;
     root.addEventListener('dragstart', (e) => {
       const cardEl = e.target.closest('.mc-tl-card');
       if (!cardEl || e.target.closest('textarea, a, button')) { e.preventDefault(); return; }
+      dragDropped = false;
       cardEl.classList.add('dragging');
       e.dataTransfer.effectAllowed = 'move';
       try { e.dataTransfer.setData('text/plain', cardEl.dataset.key); } catch {}
@@ -1583,11 +1661,14 @@
       if (after == null) zone.appendChild(dragging);
       else zone.insertBefore(dragging, after);
     });
-    root.addEventListener('drop', (e) => e.preventDefault());
+    root.addEventListener('drop', (e) => { e.preventDefault(); dragDropped = true; });
     root.addEventListener('dragend', () => {
       const dragging = root.querySelector('.mc-tl-card.dragging');
       if (dragging) dragging.classList.remove('dragging');
-      commitBoardFromDom();
+      // Only commit on an actual drop — a cancelled drag (Esc / dropped outside)
+      // re-renders from saved state instead, undoing the live DOM shuffle.
+      if (dragDropped) commitBoardFromDom();
+      dragDropped = false;
       renderTierArea(activeList());
     });
 
@@ -1742,7 +1823,7 @@
       }).join('');
       const selected = state.selectedCragId === r.id ? '1' : '0';
       return `<tr data-mc-crag="${escapeHtml(r.id)}" data-selected="${selected}">
-        <td><a href="https://thetopo.com/crags/${escapeHtml(r.id)}" target="_blank" rel="noopener" data-mc-stop>${escapeHtml(r.name)}</a></td>
+        <td><a href="https://thetopo.com/crags/${escapeHtml(encodeURIComponent(r.id))}" target="_blank" rel="noopener" data-mc-stop>${escapeHtml(r.name)}</a></td>
         <td class="mc-num">${r.done}</td>
         <td class="mc-num">${r.todo}</td>
         <td class="mc-num">${totalCell}</td>
@@ -1785,7 +1866,7 @@
         const cragName = (state.cragsAggregated.get(e.cragId) || {}).name || e.cragId;
         return `<div class="mc-firsts-row">
           <span class="g">${escapeHtml(e.gradeLabel || intToLabel(e.gi, genre))}</span>
-          <span class="c"><a href="https://thetopo.com/crags/${escapeHtml(e.cragId)}" target="_blank" rel="noopener">${escapeHtml(cragName)}</a> — ${escapeHtml(e.routeName || '')}</span>
+          <span class="c"><a href="https://thetopo.com/crags/${escapeHtml(encodeURIComponent(e.cragId))}" target="_blank" rel="noopener">${escapeHtml(cragName)}</a> — ${escapeHtml(e.routeName || '')}</span>
           <span class="d">${escapeHtml(e.date || '')}</span>
         </div>`;
       }).join('');
@@ -2136,7 +2217,7 @@
       return;
     }
 
-    title.innerHTML = `Crag spotlight — <a href="https://thetopo.com/crags/${escapeHtml(c.id)}" target="_blank" rel="noopener">${escapeHtml(c.name || c.id)}</a>
+    title.innerHTML = `Crag spotlight — <a href="https://thetopo.com/crags/${escapeHtml(encodeURIComponent(c.id))}" target="_blank" rel="noopener">${escapeHtml(c.name || c.id)}</a>
       <button class="mc-spotlight-close" id="mc-spotlight-close" title="Clear">×</button>`;
     title.querySelector('#mc-spotlight-close').addEventListener('click', () => {
       state.selectedCragId = null;
@@ -2250,7 +2331,10 @@
   }
 
   // ── Lazy-fill totals for crags we don't yet know about ─────────────
-  async function fillMissingCragTotals() {
+  function fillMissingCragTotals() {
+    return serialized(() => fillMissingCragTotalsNow());
+  }
+  async function fillMissingCragTotalsNow() {
     const missing = [];
     for (const c of state.cragsAggregated.values()) {
       const totals = state.cragTotals[c.id];
@@ -2337,8 +2421,12 @@
   // Unranked pool) without a manual Refresh. Todos-only keeps it cheap. Skips
   // the re-render if you're mid-interaction in the tierlist.
   async function backgroundRefreshTodos(user) {
+    const gen = renderGen;
     let todo;
     try { todo = await fetchUserList(user, 'todo'); } catch { return; }
+    // A newer load (e.g. a manual Refresh) started while we were fetching —
+    // its data is fresher, so discard this result instead of painting over it.
+    if (gen !== renderGen) return;
     const before = new Set(state.todo.map(r => r.key));
     const changed = todo.length !== state.todo.length || todo.some(r => !before.has(r.key));
     if (!changed) return;
@@ -2348,6 +2436,7 @@
     aggregate();
     await fillMissingCragTotals();
     await enrichTodoStats(false);
+    if (gen !== renderGen) return;
     // Don't yank the UI out from under an active edit/drag/search.
     const card = $('#mc-pb-card');
     if (card && card.contains(document.activeElement)) { renderActivity(); renderNext(); renderCrags(); return; }
@@ -2355,16 +2444,20 @@
   }
 
   async function loadAllForUser(user, useCache) {
+    const gen = ++renderGen;
     state.user = user;
     state.cragTotals = (await get(CRAG_TOTALS_KEY)) || {};
     await loadBoard();
+    if (gen !== renderGen) return;
     let servedFromCache = false;
     try {
       servedFromCache = await loadAscents(useCache, user);
     } catch (err) {
+      if (gen !== renderGen) return;
       setStatus(`Couldn't fetch ascents: ${err && err.message || err}. Make sure you're logged in to thetopo.com.`, false, true);
       return;
     }
+    if (gen !== renderGen) return;
     if (!state.done.length && !state.todo.length) {
       setStatus(`No ascents or todos found for "${user}". Either the username is wrong or you're not logged in to thetopo.com in this browser.`, false, true);
       renderAll();
@@ -2380,28 +2473,69 @@
 
     await fillMissingCragTotals();
     await enrichTodoStats(!useCache);
+    if (gen !== renderGen) return;
     renderAll();
     setStatus(`Showing ${state.done.length} sends · ${state.todo.length} todos · ${state.cragsAggregated.size} crags.`, false);
 
     // Quietly pick up todos added on thetopo since the cache was written.
-    if (servedFromCache) backgroundRefreshTodos(user);
+    if (servedFromCache) {
+      backgroundRefreshTodos(user).catch(err =>
+        console.warn('BetterCrags: background todo refresh failed:', err));
+    }
   }
 
   async function init() {
     // Wire UI
+    let refreshing = false;
     $('#mc-refresh').addEventListener('click', async () => {
+      if (refreshing) return; // in-flight guard: a second click mustn't start a concurrent refresh
       const user = ($('#mc-user-input').value || '').trim();
       if (!user) { setStatus('Enter a username first.', false, true); return; }
-      await set(USERNAME_KEY, user);
-      await loadAllForUser(user, false);
+      refreshing = true;
+      const btn = $('#mc-refresh');
+      btn.disabled = true;
+      try {
+        await set(USERNAME_KEY, user);
+        await loadAllForUser(user, false);
+      } catch (err) {
+        setStatus(`Refresh failed: ${err && err.message || err}`, false, true);
+      } finally {
+        refreshing = false;
+        btn.disabled = false;
+      }
     });
     $('#mc-clear').addEventListener('click', async () => {
       // Caches only — the project board (priorities/tiers/notes) is personal
       // data and deliberately survives a cache clear.
-      await remove([ASCENTS_CACHE_KEY, CRAG_FETCH_CACHE_KEY, ROUTE_STATS_KEY]);
-      setStatus('Cache cleared. Hit Refresh to re-fetch.', false);
-      updateCacheInfo();
+      try {
+        await remove([ASCENTS_CACHE_KEY, CRAG_FETCH_CACHE_KEY, ROUTE_STATS_KEY, CRAG_TOTALS_KEY]);
+        state.cragTotals = {};
+        state.routeStats = {};
+        state.enrichTried.clear();
+        setStatus('Cache cleared. Hit Refresh to re-fetch.', false);
+        updateCacheInfo();
+      } catch (err) {
+        setStatus(`Couldn't clear cache: ${err && err.message || err}`, false, true);
+      }
     });
+    // Cross-tab sync: re-render when another mycrags tab saves the board.
+    // The echo of this tab's own save is matched against the snapshot taken at
+    // write time (not live state.board, which may already hold a newer edit).
+    try {
+      chrome.storage.onChanged.addListener((changes, areaName) => {
+        if (areaName !== 'local' || !changes[BOARD_KEY]) return;
+        const next = changes[BOARD_KEY].newValue;
+        if (!next || !Array.isArray(next.lists)) return;
+        try {
+          const nextStr = JSON.stringify(next);
+          if (nextStr === lastBoardWrite) return;
+          if (nextStr === JSON.stringify(state.board)) return;
+        } catch {}
+        state.board = next;
+        boardBrowse = null;
+        renderBoard();
+      });
+    } catch {}
     wireBoard();
     initTabs();
     $('#mc-user-input').addEventListener('keydown', (e) => {
@@ -2433,5 +2567,8 @@
     await loadAllForUser(user, true);
   }
 
-  init();
+  init().catch(err => {
+    console.error('BetterCrags: init failed:', err);
+    try { setStatus(`Something went wrong: ${err && err.message || err}`, false, true); } catch {}
+  });
 })();

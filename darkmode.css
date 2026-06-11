@@ -5,7 +5,7 @@
    speckled content background, the header is `.navbar-inverse` (already
    dark), and Bootstrap forms/buttons use the usual `.btn`/`.form-control`. */
 
-:root {
+html.bettercrags-dark {
   --bc-bg: #14181d;
   --bc-bg-elev: #1c2128;
   --bc-bg-elev-2: #232a32;

@@ -11,10 +11,17 @@ function setNote(text) {
   note.textContent = text || '';
 }
 
+// Filters default to ON, so seed the checkbox checked right away — otherwise
+// it flashes unchecked for the instant before storage resolves. Dark mode
+// defaults to OFF, which already matches the unchecked markup.
+filtersInput.checked = true;
+
+// FILTER_KEY is the same global key content.js persists its panel state
+// under; new tabs seed from it, so it's the best guess for the active tab.
+// The change handler below reconciles against the tab's live state.
 chrome.storage.local.get([DARK_KEY, FILTER_KEY], (o) => {
   darkInput.checked = !!(o && o[DARK_KEY]);
   const saved = o && o[FILTER_KEY];
-  // Filters default to ON when nothing has been saved yet.
   filtersInput.checked = !saved || saved.enabled !== false;
 });
 

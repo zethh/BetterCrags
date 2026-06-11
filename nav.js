@@ -4,10 +4,33 @@
   'use strict';
 
   const LINK_ID = 'bc-mycrags-nav';
+  const STYLE_ID = 'bc-mycrags-nav-style';
   const MYCRAGS_URL = chrome.runtime.getURL('mycrags.html');
 
   function injected() {
     return document.getElementById(LINK_ID);
+  }
+
+  // nav.js's manifest entry loads no CSS file, so carry the link's styling
+  // in a small injected <style> block instead of inline element styles.
+  function ensureStyles() {
+    if (document.getElementById(STYLE_ID)) return;
+    const style = document.createElement('style');
+    style.id = STYLE_ID;
+    style.textContent = `
+      .bc-mycrags-nav-link {
+        display: inline-flex;
+        align-items: center;
+        padding: 14px 14px;
+        color: #d8dde3;
+        font-weight: 600;
+        letter-spacing: 0.02em;
+        text-decoration: none;
+        gap: 6px;
+      }
+      .bc-mycrags-nav-link:hover { color: #fff; }
+    `;
+    (document.head || document.documentElement).appendChild(style);
   }
 
   // Find the right-hand nav cluster (where the bell / user avatar live), or
@@ -41,17 +64,6 @@
     a.textContent = 'My Crags';
     a.title = 'BetterCrags — open the My Crags dashboard';
     a.className = 'bc-mycrags-nav-link';
-    a.style.cssText = `
-      display: inline-flex; align-items: center;
-      padding: 14px 14px;
-      color: #d8dde3;
-      font-weight: 600;
-      letter-spacing: 0.02em;
-      text-decoration: none;
-      gap: 6px;
-    `;
-    a.addEventListener('mouseenter', () => { a.style.color = '#fff'; });
-    a.addEventListener('mouseleave', () => { a.style.color = '#d8dde3'; });
 
     if (isList) {
       const li = document.createElement('li');
@@ -66,6 +78,7 @@
     if (injected()) return true;
     const target = findNavTarget();
     if (!target) return false;
+    ensureStyles();
     const node = buildLinkElement(target);
 
     // Try to land next to "Feed" or before the notification bell / avatar.

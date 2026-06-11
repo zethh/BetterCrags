@@ -43,31 +43,8 @@
 
   // 27crags-style numeric → climbing label. Source values empirically chosen.
   // Boulder uses Font, sport/trad uses French.
-  // Empirically derived from thetopo's data store (grade_int → displayed label).
-  // Step size is +50 per sub-grade. 6A starts at 400.
-  const FONT_GRADES = [
-    [100, '3'], [200, '4'], [300, '5'], [350, '5+'],
-    [400, '6A'], [450, '6A+'], [500, '6B'], [550, '6B+'],
-    [600, '6C'], [650, '6C+'],
-    [700, '7A'], [750, '7A+'], [800, '7B'], [850, '7B+'],
-    [900, '7C'], [950, '7C+'],
-    [1000, '8A'], [1050, '8A+'], [1100, '8B'], [1150, '8B+'],
-    [1200, '8C'], [1250, '8C+'],
-    [1300, '9A'], [1350, '9A+'], [1400, '9B'], [1450, '9B+'],
-    [1500, '9C'],
-  ];
-  // French (sport) scale, aligned to the same grade_int values.
-  const FRENCH_GRADES = [
-    [100, '3'], [200, '4a'], [300, '4c'], [350, '5a'],
-    [400, '5c'], [450, '6a'], [500, '6a+'], [550, '6b'],
-    [600, '6b+'], [650, '6c'],
-    [700, '6c+'], [750, '7a'], [800, '7a+'], [850, '7b'],
-    [900, '7b+'], [950, '7c'],
-    [1000, '7c+'], [1050, '8a'], [1100, '8a+'], [1150, '8b'],
-    [1200, '8b+'], [1250, '8c'],
-    [1300, '8c+'], [1350, '9a'], [1400, '9a+'], [1450, '9b'],
-    [1500, '9c'],
-  ];
+  // Grade tables + escapeHtml live in shared.js (loaded first via manifest).
+  const { FONT_GRADES, FRENCH_GRADES, escapeHtml } = window.BCShared;
 
   const SORT_OPTIONS = [
     ['rating_desc', 'Rating ↓'],
@@ -93,7 +70,6 @@
     `).join('');
   }
 
-  const log = (...a) => console.log('[BetterCrags]', ...a);
   const warn = (...a) => console.warn('[BetterCrags]', ...a);
 
   // Tuning constants.
@@ -124,6 +100,7 @@
   const META_CACHE_KEY = 'bc_meta_cache_v1';
   const META_TTL_MS = 7 * 24 * 60 * 60 * 1000;
   const CRAG_TOTALS_KEY = 'bc_crag_totals_v1';
+  const CRAG_TOTALS_TTL_MS = 90 * 24 * 60 * 60 * 1000;
 
   // Build per-crag totals (counts + grade histogram) from a route array, so
   // visiting an area routelist incrementally fills the My Crags cache for
@@ -152,6 +129,10 @@
       chrome.storage.local.get(CRAG_TOTALS_KEY, (o) => {
         const existing = (o && o[CRAG_TOTALS_KEY]) || {};
         const now = Date.now();
+        // Prune stale entries while we're merging — keeps the store bounded.
+        for (const [id, data] of Object.entries(existing)) {
+          if (!data || !data.t || (now - data.t) > CRAG_TOTALS_TTL_MS) delete existing[id];
+        }
         for (const [id, data] of byCrag) {
           existing[id] = { ...data, t: now };
         }
@@ -250,10 +231,26 @@
   }
 
   const USERNAME_KEY = 'bc_username_v1';
+  function usernameFromLink(a) {
+    const m = (a.getAttribute('href') || '').match(/^\/climbers\/([^/?#]+)(?:[/?#]|$)/);
+    return (m && m[1] && !['top', 'index', 'search'].includes(m[1])) ? m[1] : null;
+  }
   function detectUsername() {
+    // Prefer the logged-in account UI (header / nav / account menu) — a
+    // /climbers/ link in page content (e.g. an ascent log) can belong to a
+    // different user and must not be persisted as ours.
+    for (const sel of ['nav', 'header', '.navbar', '[data-component-name="Nav"]', '.account', '.user-menu', '.dropdown-menu']) {
+      for (const root of document.querySelectorAll(sel)) {
+        for (const a of root.querySelectorAll('a[href^="/climbers/"]')) {
+          const u = usernameFromLink(a);
+          if (u) return u;
+        }
+      }
+    }
+    // Fallback heuristic: first climber link anywhere on the page.
     for (const a of document.querySelectorAll('a[href^="/climbers/"]')) {
-      const m = (a.getAttribute('href') || '').match(/^\/climbers\/([^/?#]+)(?:[/?#]|$)/);
-      if (m && m[1] && !['top', 'index', 'search'].includes(m[1])) return m[1];
+      const u = usernameFromLink(a);
+      if (u) return u;
     }
     return null;
   }
@@ -290,7 +287,10 @@
     return new DOMParser().parseFromString(text, 'text/html');
   }
 
-  // Fetch page 0 to discover total page count, then fire pages 1..N in parallel.
+  // Fetch page 0 to discover total page count, then drain pages 1..N through
+  // a small worker pool. Two lists load concurrently (todo + done), so keep
+  // the per-call cap low — 3 each ≈ 6 requests in flight overall.
+  const MAX_KEYSET_CONCURRENT = 3;
   async function fetchRouteKeySet(url, signal) {
     const set = new Set();
     try {
@@ -301,18 +301,23 @@
       const maxPage = maxPageInPager(doc0);
       if (maxPage <= 0) return set;
 
-      const tasks = [];
-      for (let p = 1; p <= Math.min(maxPage, 99); p++) {
-        tasks.push(
-          fetchPage(url, p, signal).then(doc => doc && extractRouteKeysInto(doc, set))
-            .catch(err => {
-              if (err && err.name !== 'AbortError' && err.name !== 'TypeError') {
-                warn('fetchRouteKeySet page failed', url, p, err);
-              }
-            })
-        );
+      const last = Math.min(maxPage, 99);
+      let next = 1;
+      async function worker() {
+        while (next <= last) {
+          if (signal && signal.aborted) return;
+          const p = next++;
+          try {
+            const doc = await fetchPage(url, p, signal);
+            if (doc) extractRouteKeysInto(doc, set);
+          } catch (err) {
+            if (err && err.name !== 'AbortError' && err.name !== 'TypeError') {
+              warn('fetchRouteKeySet page failed', url, p, err);
+            }
+          }
+        }
       }
-      await Promise.all(tasks);
+      await Promise.all(Array.from({ length: Math.min(MAX_KEYSET_CONCURRENT, last) }, worker));
       return set;
     } catch (err) {
       if (err && err.name === 'AbortError') return set.size ? set : null;
@@ -351,14 +356,11 @@
     try {
       const obj = await loadMetaCacheRaw();
       const now = Date.now();
-      let kept = 0, dropped = 0;
       for (const [id, entry] of Object.entries(obj)) {
         if (entry && entry.t && (now - entry.t) < META_TTL_MS) {
           ROUTE_META_CACHE.set(+id, entry);
-          kept++;
-        } else { dropped++; }
+        }
       }
-      if (kept || dropped) log(`meta cache hydrated: ${kept} kept, ${dropped} expired`);
     } catch (err) {
       warn('hydrateMetaCache failed', err);
     }
@@ -402,9 +404,304 @@
     return map;
   }
 
-  async function fetchUnrestrictedRoutes() {
+  // Keyed diff between the current tbody and a filtered route list. Rows that
+  // survive keep their DOM node (and image observer state). Only added /
+  // removed / moved rows pay DOM cost. First chunk runs sync; the tail
+  // streams in via ric so long lists don't block input handlers.
+  // All state comes in explicitly: `getTbody()`/`getTotal()` read live caller
+  // state; `buildRowEl` / `observeRowImg` / `unobserveRowImg` /
+  // `applyRowActionStates` do per-row work; `countEl` shows streaming progress.
+  function createRowReconciler({ getTbody, getTotal, buildRowEl, observeRowImg, unobserveRowImg, applyRowActionStates, countEl }) {
+    let cancelRender = null;
+    let renderingRows = false;
+
+    function reconcile(filtered) {
+      const tbody = getTbody();
+      const have = new Map();
+      for (let i = 0, n = tbody.children.length; i < n; i++) {
+        const tr = tbody.children[i];
+        const id = +tr.dataset.routeId;
+        if (id) have.set(id, tr);
+      }
+      const wantIds = new Set();
+      for (let i = 0, n = filtered.length; i < n; i++) wantIds.add(filtered[i].id);
+
+      for (const [id, tr] of have) {
+        if (!wantIds.has(id)) {
+          unobserveRowImg(tr);
+          tr.remove();
+          have.delete(id);
+        }
+      }
+
+      if (filtered.length === 0) {
+        renderingRows = false;
+        return;
+      }
+
+      function placeRange(start, end) {
+        let prev = start === 0 ? null : have.get(filtered[start - 1].id) || null;
+        for (let i = start; i < end; i++) {
+          const r = filtered[i];
+          let tr = have.get(r.id);
+          if (!tr) {
+            tr = buildRowEl(r);
+            have.set(r.id, tr);
+          }
+          const expected = prev ? prev.nextSibling : tbody.firstChild;
+          if (tr !== expected) tbody.insertBefore(tr, expected);
+          observeRowImg(tr);
+          applyRowActionStates(tr);
+          prev = tr;
+        }
+      }
+
+      let cancelled = false;
+      cancelRender = () => { cancelled = true; renderingRows = false; };
+      renderingRows = true;
+
+      const FIRST = Math.min(FIRST_CHUNK, filtered.length);
+      placeRange(0, FIRST);
+      let cursor = FIRST;
+
+      if (cursor >= filtered.length) {
+        cancelRender = null;
+        renderingRows = false;
+        return;
+      }
+
+      const tick = () => {
+        if (cancelled) return;
+        const end = Math.min(cursor + RENDER_CHUNK, filtered.length);
+        placeRange(cursor, end);
+        cursor = end;
+        countEl.textContent = ` ${cursor}/${filtered.length}…`;
+        if (cursor < filtered.length) {
+          ric(tick);
+        } else {
+          countEl.textContent = ` ${filtered.length}/${getTotal()}`;
+          cancelRender = null;
+          renderingRows = false;
+        }
+      };
+      ric(tick);
+    }
+
+    function cancel() {
+      if (cancelRender) { cancelRender(); cancelRender = null; }
+    }
+
+    return { reconcile, cancel, isRendering: () => renderingRows };
+  }
+
+  // Per-route metadata (video/comment) fetch queue with a small concurrency
+  // cap, a progress counter rendered into `progressEl`, and ~400ms-batched
+  // `onApply` notifications so a fetch storm doesn't thrash the filter pass.
+  // `metaCache`: Map<id, {video,comment,t}|null>; `fetchMeta(href, signal)`;
+  // `persistSoon()` schedules cache persistence; `onApply()` re-applies filters.
+  function createMetaQueue({ progressEl, metaCache, fetchMeta, persistSoon, onApply }) {
+    const MAX_META_CONCURRENT = 3;
+    const metaQueue = [];
+    let metaInFlight = 0;
+    let metaCheckTotal = 0;
+    let metaCheckDone = 0;
+    // Bumped on cancel so any in-flight tasks queued under a prior run skip
+    // counter updates (prevents progress drift after filter toggles).
+    let metaRunId = 0;
+    // Per-run controller so cancelMetaQueue can abort in-flight fetches too.
+    let metaAbort = new AbortController();
+
+    // Batch meta-completion-triggered applies — without this each of 3000+
+    // route fetches calls onApply, causing a full filter+sort pass on
+    // every fetch result. ~400ms batches mean newly-filtered routes fade
+    // out a few times per second instead of continuously thrashing CPU.
+    const META_APPLY_INTERVAL_MS = 400;
+    let metaApplyTimer = null;
+    function scheduleApplyFromMeta() {
+      if (metaApplyTimer) return;
+      metaApplyTimer = setTimeout(() => {
+        metaApplyTimer = null;
+        onApply();
+      }, META_APPLY_INTERVAL_MS);
+    }
+
+    function updateMetaProgress() {
+      if (!progressEl) return;
+      const remaining = metaCheckTotal - metaCheckDone;
+      if (metaCheckTotal === 0 || remaining <= 0) {
+        progressEl.hidden = true;
+        progressEl.textContent = '';
+        if (metaCheckTotal > 0 && remaining <= 0) {
+          metaCheckTotal = 0;
+          metaCheckDone = 0;
+        }
+      } else {
+        progressEl.hidden = false;
+        progressEl.textContent = ` · checking ${metaCheckDone}/${metaCheckTotal}…`;
+      }
+    }
+
+    function pumpMetaQueue() {
+      while (metaInFlight < MAX_META_CONCURRENT && metaQueue.length) {
+        const task = metaQueue.shift();
+        metaInFlight++;
+        Promise.resolve().then(task).finally(() => { metaInFlight--; pumpMetaQueue(); });
+      }
+    }
+
+    function queueMetaForRoutes(candidates) {
+      const runId = metaRunId;
+      const signal = metaAbort.signal;
+      let queued = 0;
+      for (const r of candidates) {
+        if (metaCache.has(r.id)) continue;
+        if (!r.crag_param_id || !r.param_id) continue;
+        const href = `/crags/${encodeURIComponent(r.crag_param_id)}/routes/${encodeURIComponent(r.param_id)}`;
+        metaCache.set(r.id, null);
+        queued++;
+        metaQueue.push(async () => {
+          const meta = await fetchMeta(href, signal);
+          if (meta) {
+            metaCache.set(r.id, { video: meta.video, comment: meta.comment, t: Date.now() });
+            persistSoon();
+          } else {
+            metaCache.delete(r.id);
+          }
+          if (runId === metaRunId) {
+            metaCheckDone++;
+            updateMetaProgress();
+          }
+          // Batched via scheduleApplyFromMeta — routes flip out in ~400ms
+          // bursts during a fetch storm instead of per-completion.
+          scheduleApplyFromMeta();
+        });
+      }
+      if (queued > 0) {
+        metaCheckTotal += queued;
+        updateMetaProgress();
+        pumpMetaQueue();
+      }
+    }
+
+    function cancelMetaQueue() {
+      // Drop pending work, abort in-flight fetches, and invalidate
+      // in-flight counter updates.
+      if (metaApplyTimer) { clearTimeout(metaApplyTimer); metaApplyTimer = null; }
+      metaQueue.length = 0;
+      metaCheckTotal = 0;
+      metaCheckDone = 0;
+      metaRunId++;
+      metaAbort.abort();
+      metaAbort = new AbortController();
+      updateMetaProgress();
+    }
+
+    return { queueMetaForRoutes, cancelMetaQueue };
+  }
+
+  // Lazy image loading via the batched photos API. Visible row images are
+  // observed; intersecting ids are coalesced into batch requests through a
+  // small concurrency-capped queue.
+  // `imgCache`: Map<id, url|''>; `fetchBatch(ids) -> Promise<Map<id, url>>`.
+  function createImageLazyLoader({ imgCache, fetchBatch }) {
+    const BATCH_SIZE = 100;        // max ids per /api/web01/search/photos request
+    const BATCH_DEBOUNCE_MS = 80;  // coalesce intersections briefly into one request
+    const MAX_BATCH_CONCURRENT = 3;
+    const pendingIds = new Set();
+    const idToImgs = new Map();    // id -> Set<HTMLImageElement>
+    let batchTimer = null;
+    let inFlightBatches = 0;
+    const queuedBatches = [];
+    function runNextBatch() {
+      while (inFlightBatches < MAX_BATCH_CONCURRENT && queuedBatches.length) {
+        const slice = queuedBatches.shift();
+        inFlightBatches++;
+        fetchBatch(slice)
+          .then(map => { for (const id of slice) applyImageUrl(id, map.get(id) || ''); })
+          .finally(() => { inFlightBatches--; runNextBatch(); });
+      }
+    }
+
+    function applyImageUrl(id, url) {
+      imgCache.set(id, url || '');
+      const imgs = idToImgs.get(id);
+      if (!imgs) return;
+      if (url) {
+        for (const img of imgs) if (img.isConnected) img.src = url;
+      }
+      idToImgs.delete(id);
+    }
+
+    async function flushBatch() {
+      batchTimer = null;
+      if (!pendingIds.size) return;
+      const ids = [...pendingIds];
+      pendingIds.clear();
+      for (let i = 0; i < ids.length; i += BATCH_SIZE) {
+        queuedBatches.push(ids.slice(i, i + BATCH_SIZE));
+      }
+      runNextBatch();
+    }
+    function queueImage(id, img) {
+      if (imgCache.has(id)) {
+        const url = imgCache.get(id);
+        if (url && img.isConnected) img.src = url;
+        return;
+      }
+      let bucket = idToImgs.get(id);
+      if (!bucket) { bucket = new Set(); idToImgs.set(id, bucket); }
+      bucket.add(img);
+      pendingIds.add(id);
+      if (!batchTimer) batchTimer = setTimeout(flushBatch, BATCH_DEBOUNCE_MS);
+    }
+
+    const imgObserver = ('IntersectionObserver' in window) ? new IntersectionObserver((entries) => {
+      for (const e of entries) {
+        if (!e.isIntersecting) continue;
+        const img = e.target;
+        imgObserver.unobserve(img);
+        const id = Number(img.getAttribute('data-bc-img-id'));
+        if (id) queueImage(id, img);
+      }
+    }, { rootMargin: '400px 0px' }) : null;
+
+    function observeRowImg(tr) {
+      const img = tr.querySelector && tr.querySelector('img[data-bc-img-id]');
+      if (!img || img.dataset.bcObserved === '1') return;
+      img.dataset.bcObserved = '1';
+      const id = Number(img.getAttribute('data-bc-img-id'));
+      if (imgCache.has(id)) {
+        const url = imgCache.get(id);
+        if (url) img.src = url;
+        return;
+      }
+      if (imgObserver) imgObserver.observe(img);
+      else queueImage(id, img);
+    }
+
+    // Called when a row leaves the DOM during reconcile — drop its observer
+    // registration and any pending-batch bucket entry so they don't accumulate.
+    function unobserveRowImg(tr) {
+      const img = tr.querySelector && tr.querySelector('img[data-bc-img-id]');
+      if (!img) return;
+      if (imgObserver && img.dataset.bcObserved === '1') imgObserver.unobserve(img);
+      delete img.dataset.bcObserved;
+      const id = Number(img.getAttribute('data-bc-img-id'));
+      const bucket = idToImgs.get(id);
+      if (bucket) {
+        bucket.delete(img);
+        if (!bucket.size) idToImgs.delete(id);
+      }
+    }
+
+    return { observeRowImg, unobserveRowImg };
+  }
+
+  // Fetch a routelist page with all filters widened (full grade span, every
+  // genre, no rating cut) and return its embedded RouteList JSON store.
+  async function fetchRouteListStore(baseUrl, label) {
     try {
-      const u = new URL(location.href);
+      const u = new URL(baseUrl, location.origin);
       u.searchParams.set('grade_min', '100');
       u.searchParams.set('grade_max', '1500');
       u.searchParams.delete('rating');
@@ -413,16 +710,20 @@
         u.searchParams.set(g, '1');
       }
       const res = await fetch(u.toString(), { credentials: 'include', headers: { 'Accept': 'text/html' } });
-      if (!res.ok) { warn('unrestricted fetch failed', res.status); return null; }
+      if (!res.ok) { warn(`${label} fetch failed`, res.status); return null; }
       const text = await res.text();
       const doc = new DOMParser().parseFromString(text, 'text/html');
       const tag = doc.querySelector('script[data-component-name="RouteList"]');
-      if (!tag) { warn('unrestricted fetch had no RouteList store'); return null; }
+      if (!tag) { warn(`${label} fetch had no RouteList store`); return null; }
       return JSON.parse(tag.textContent);
     } catch (err) {
-      warn('unrestricted fetch threw', err);
+      warn(`${label} fetch threw`, err);
       return null;
     }
+  }
+
+  function fetchUnrestrictedRoutes() {
+    return fetchRouteListStore(location.href, 'unrestricted');
   }
 
   // Crag routelist pages (/crags/<slug>/routelist) use a server-rendered
@@ -442,25 +743,8 @@
     const am = href.match(/^\/areas\/([^/?#]+)/);
     return { crag_param_id, area_param_id: am ? decodeURIComponent(am[1]) : null };
   }
-  async function fetchAreaStore(areaParamId) {
-    try {
-      const u = new URL(`/areas/${encodeURIComponent(areaParamId)}/routelist`, location.origin);
-      u.searchParams.set('grade_min', '100');
-      u.searchParams.set('grade_max', '1500');
-      for (const g of ['Boulder', 'Sport', 'Traditional', 'DWS', 'Other']) {
-        u.searchParams.set(g, '1');
-      }
-      const res = await fetch(u.toString(), { credentials: 'include', headers: { 'Accept': 'text/html' } });
-      if (!res.ok) { warn('area fetch failed', res.status, areaParamId); return null; }
-      const text = await res.text();
-      const doc = new DOMParser().parseFromString(text, 'text/html');
-      const tag = doc.querySelector('script[data-component-name="RouteList"]');
-      if (!tag) { warn('area fetch had no RouteList store', areaParamId); return null; }
-      return JSON.parse(tag.textContent);
-    } catch (err) {
-      warn('area fetch threw', areaParamId, err);
-      return null;
-    }
+  function fetchAreaStore(areaParamId) {
+    return fetchRouteListStore(`/areas/${encodeURIComponent(areaParamId)}/routelist`, `area "${areaParamId}"`);
   }
 
   function gradeLabelFor(gi, genre) {
@@ -471,11 +755,6 @@
       if (d < bestD) { bestD = d; best = l; }
     }
     return best;
-  }
-
-  function escapeHtml(s) {
-    return String(s == null ? '' : s).replace(/[&<>"']/g, c =>
-      ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   }
 
   // ── "Add to todo" / "Mark as done" modal ────────────────────────────
@@ -501,9 +780,11 @@
     for (const el of all) {
       for (const attr of [...el.attributes]) {
         if (/^on/i.test(attr.name)) { el.removeAttribute(attr.name); continue; }
-        const v = attr.value || '';
+        // Browsers strip ASCII control chars / spaces inside the scheme, so
+        // "java\tscript:" still executes — normalize the same way before testing.
+        const v = (attr.value || '').replace(/[\x00-\x20]/g, '');
         if ((attr.name === 'href' || attr.name === 'src' || attr.name === 'formaction') &&
-            /^\s*javascript:/i.test(v)) {
+            /^javascript:/i.test(v)) {
           el.removeAttribute(attr.name);
         }
       }
@@ -601,8 +882,14 @@
       return;
     }
 
-    // Resolve relative action against the form page URL.
+    // Resolve relative action against the form page URL, and refuse to POST
+    // credentials anywhere but our own origin.
     const action = new URL(form.getAttribute('action') || formUrl, location.origin + formUrl).toString();
+    if (new URL(action, location.href).origin !== location.origin) {
+      warn('ascent form action is cross-origin; refusing to submit', action);
+      body.innerHTML = `<div class="tt-xf-modal-status tt-xf-modal-error">Unexpected form target. <a href="${escapeHtml(formUrl)}" target="_blank" rel="noreferrer noopener">Open in new tab</a> instead.</div>`;
+      return;
+    }
     form.setAttribute('action', action);
     sanitizeInjectedForm(form);
 
@@ -675,7 +962,7 @@
     const name = escapeHtml(route.name);
     const cragName = escapeHtml(route.crag_name || '');
     const genre = escapeHtml(route.genre || '');
-    const ascents = route.ascents_done_count || 0;
+    const ascents = Number(route.ascents_done_count) || 0;
     const rid = escapeHtml(String(route.id));
     const routeKey = escapeHtml(`${route.crag_param_id || ''}/${route.param_id || ''}`);
     const html = `<tr role="row" data-tt-xf-own="1" data-route-id="${rid}">
@@ -718,6 +1005,10 @@
 
 
   const PROMO_SELECTORS = ['#get-topo', 'section.buy-topo'];
+  // The fallback keyword scan walks every body element; give up after a few
+  // empty scans — a promo that hasn't appeared by then isn't coming.
+  const PROMO_SCAN_MAX_MISSES = 8;
+  let promoScanMisses = 0;
   function hidePromos() {
     // Exact known selectors first — fast and reliable.
     for (const sel of PROMO_SELECTORS) {
@@ -729,6 +1020,7 @@
     }
     // Fallback keyword scan only if the known selectors miss (future-proof).
     if (document.querySelector(`[data-tt-xf-promo-hidden="1"]`)) return;
+    if (promoScanMisses >= PROMO_SCAN_MAX_MISSES) return;
     const candidates = [];
     for (const el of document.querySelectorAll('body *')) {
       if (el.closest('.tt-xf-panel')) continue;
@@ -747,6 +1039,8 @@
       c.dataset.ttXfPromoHidden = '1';
       hidden.push(c);
     }
+    if (hidden.length) promoScanMisses = 0;
+    else promoScanMisses++;
   }
 
   const NATIVE_FILTER_SELECTORS = [
@@ -811,7 +1105,7 @@
             <div class="tt-xf-field tt-xf-field-genre">
               <span class="tt-xf-lbl">Genre</span>
               <div class="tt-xf-pills" data-tt-xf-genres>
-                ${genres.map(g => `<button type="button" class="tt-xf-pill" data-tt-xf-genre="${g}" data-state="off">${g}</button>`).join('')}
+                ${genres.map(g => `<button type="button" class="tt-xf-pill" data-tt-xf-genre="${escapeHtml(g)}" data-state="off">${escapeHtml(g)}</button>`).join('')}
               </div>
             </div>` : ''}
           <div class="tt-xf-field tt-xf-field-grade">
@@ -979,6 +1273,47 @@
     panel.style.top = findNavBottom() + 'px';
   }
 
+  // Dual-range slider: drive both inputs entirely via JS pointer events on the wrapper.
+  function setupDualDrag(wrapper) {
+    const inputs = wrapper.querySelectorAll('input[type="range"]');
+    if (inputs.length < 2) return;
+    const [a, b] = inputs;
+    let active = null;
+
+    function valueFromEvent(e) {
+      const rect = wrapper.getBoundingClientRect();
+      const pct = (e.clientX - rect.left) / Math.max(1, rect.width);
+      const min = +a.min, max = +a.max;
+      return Math.round(min + Math.max(0, Math.min(1, pct)) * (max - min));
+    }
+    function setVal(input, val) {
+      if (+input.value === val) return;
+      input.value = String(val);
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+
+    wrapper.addEventListener('pointerdown', (e) => {
+      e.preventDefault();
+      const val = valueFromEvent(e);
+      const da = Math.abs(val - +a.value);
+      const db = Math.abs(val - +b.value);
+      active = da <= db ? a : b;
+      setVal(active, val);
+      try { wrapper.setPointerCapture(e.pointerId); } catch (_) {}
+    });
+    wrapper.addEventListener('pointermove', (e) => {
+      if (!active) return;
+      setVal(active, valueFromEvent(e));
+    });
+    function endDrag(e) {
+      if (!active) return;
+      try { wrapper.releasePointerCapture(e.pointerId); } catch (_) {}
+      active = null;
+    }
+    wrapper.addEventListener('pointerup', endDrag);
+    wrapper.addEventListener('pointercancel', endDrag);
+  }
+
   async function init() {
     let store = readEmbeddedStore();
     let cragCtx = null;
@@ -993,14 +1328,12 @@
           warn(`crag routelist "${cragCtx.crag_param_id}": no parent area link on page`);
           return;
         }
-        log(`crag routelist: fetching parent area "${cragCtx.area_param_id}" for full route data…`);
         const areaStore = await fetchAreaStore(cragCtx.area_param_id);
         if (areaStore && Array.isArray(areaStore.routes)) {
           const matched = areaStore.routes.filter(r => r.crag_param_id === cragCtx.crag_param_id);
           if (matched.length) {
             allAreaRoutes = areaStore.routes;
             store = { ...areaStore, routes: matched };
-            log(`derived ${matched.length} routes for crag "${cragCtx.crag_param_id}" (out of ${areaStore.routes.length} in area)`);
           } else {
             warn(`no routes matched crag "${cragCtx.crag_param_id}" in area "${cragCtx.area_param_id}"`);
           }
@@ -1011,7 +1344,6 @@
     let routes = store && Array.isArray(store.routes) ? store.routes : [];
     if (!routes.length) { warn('no routes found in embedded store'); return; }
     const noImageUrl = (store && store.noImageUrl) || PLACEHOLDER_IMG;
-    log(`loaded ${routes.length} routes; dominant genre: ${dominantGenre(routes)}`);
 
     const gradeTable = pickGradeTable(routes);
     const panel = createPanel(routes, gradeTable);
@@ -1030,10 +1362,11 @@
       fetchUnrestrictedRoutes().then(wider => {
         if (!wider || !Array.isArray(wider.routes)) return;
         if (wider.routes.length <= initialCount) return;
-        log(`expanded to ${wider.routes.length} routes (was ${initialCount}) via background fetch`);
         routes = wider.routes;
         ROW_HTML_CACHE.clear();
         persistCragTotals(harvestCragTotals(routes));
+        // the wider set may contain genres the initial pills didn't cover
+        rebuildGenrePills();
         // re-warm cache so the next filter change is instant
         if (typeof warmRowCache === 'function') warmRowCache();
         // force re-render with new data
@@ -1124,7 +1457,6 @@
       chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
         if (msg && msg.type === 'BC_TOGGLE') {
           const wasEnabled = !panel.classList.contains('tt-xf-off');
-          log(`toolbar toggle received: ${wasEnabled ? 'ON→OFF' : 'OFF→ON'}`);
           setEnabled(!wasEnabled);
           saveState();
           syncBadge();
@@ -1145,26 +1477,45 @@
       }
     });
 
-    panel.querySelectorAll('[data-tt-xf-tag]').forEach(b => {
+    function bindTriStatePill(b) {
       b.addEventListener('click', () => {
         const cur = b.dataset.state || 'ignore';
         b.dataset.state = cur === 'ignore' ? 'include' : cur === 'include' ? 'exclude' : 'ignore';
         scheduleApply();
       });
-    });
-    panel.querySelectorAll('[data-tt-xf-list], [data-tt-xf-meta]').forEach(b => {
-      b.addEventListener('click', () => {
-        const cur = b.dataset.state || 'ignore';
-        b.dataset.state = cur === 'ignore' ? 'include' : cur === 'include' ? 'exclude' : 'ignore';
-        scheduleApply();
-      });
-    });
-    panel.querySelectorAll('[data-tt-xf-genre]').forEach(b => {
+    }
+    panel.querySelectorAll('[data-tt-xf-tag], [data-tt-xf-list], [data-tt-xf-meta]').forEach(bindTriStatePill);
+    function bindGenrePill(b) {
       b.addEventListener('click', () => {
         b.dataset.state = b.dataset.state === 'on' ? 'off' : 'on';
         scheduleApply();
       });
-    });
+    }
+    panel.querySelectorAll('[data-tt-xf-genre]').forEach(bindGenrePill);
+
+    // The wider background fetch can introduce genres that were absent from
+    // the initial route set (and the whole pill group is omitted when the
+    // initial set has <= 1 genre). Rebuild the pills from the current
+    // `routes` so mixed results stay filterable, preserving active states.
+    function rebuildGenrePills() {
+      const genres = uniq(routes.map(r => r.genre)).sort();
+      let pills = panel.querySelector('[data-tt-xf-genres]');
+      if (genres.length <= 1 && !pills) return;
+      const prevOn = new Set([...panel.querySelectorAll('[data-tt-xf-genre]')]
+        .filter(b => b.dataset.state === 'on')
+        .map(b => b.getAttribute('data-tt-xf-genre')));
+      if (!pills) {
+        const gradeField = panel.querySelector('.tt-xf-field-grade');
+        if (!gradeField) return;
+        const field = document.createElement('div');
+        field.className = 'tt-xf-field tt-xf-field-genre';
+        field.innerHTML = '<span class="tt-xf-lbl">Genre</span><div class="tt-xf-pills" data-tt-xf-genres></div>';
+        gradeField.parentElement.insertBefore(field, gradeField);
+        pills = field.querySelector('[data-tt-xf-genres]');
+      }
+      pills.innerHTML = genres.map(g => `<button type="button" class="tt-xf-pill" data-tt-xf-genre="${escapeHtml(g)}" data-state="${prevOn.has(g) ? 'on' : 'off'}">${escapeHtml(g)}</button>`).join('');
+      pills.querySelectorAll('[data-tt-xf-genre]').forEach(bindGenrePill);
+    }
 
     function updateDualFill(wrapper) {
       const inputs = wrapper.querySelectorAll('input[type="range"]');
@@ -1319,182 +1670,30 @@
     let readmoreHidden = false;
     let ourTable = null;
     let ourTbody = null;
-    let cancelRender = null;
-    let renderingRows = false;
     let lastPromoScan = 0;
     let todoSet = null;
     let doneSet = null;
     const userListsAbort = new AbortController();
+    // Teardown: cancel in-flight list-page fetches when the page goes away.
+    window.addEventListener('pagehide', () => userListsAbort.abort(), { once: true });
 
-    // Per-route meta (video/comment) loading. Eagerly queued for the full
-    // filtered candidate set when the filter is active so the user gets a
-    // visible progress count. Results are persisted (7-day TTL) so subsequent
-    // sessions resolve from cache.
-    const MAX_META_CONCURRENT = 3;
-    const metaQueue = [];
-    let metaInFlight = 0;
-    let metaCheckTotal = 0;
-    let metaCheckDone = 0;
-    // Bumped on cancel so any in-flight tasks queued under a prior run skip
-    // counter updates (prevents progress drift after filter toggles).
-    let metaRunId = 0;
-    const metaProgressEl = panel.querySelector('[data-tt-xf-meta-progress]');
-
-    // Batch meta-completion-triggered applies — without this each of 3000+
-    // route fetches calls scheduleApply, causing a full filter+sort pass on
-    // every fetch result. ~400ms batches mean newly-filtered routes fade
-    // out a few times per second instead of continuously thrashing CPU.
-    const META_APPLY_INTERVAL_MS = 400;
-    let metaApplyTimer = null;
-    function scheduleApplyFromMeta() {
-      if (metaApplyTimer) return;
-      metaApplyTimer = setTimeout(() => {
-        metaApplyTimer = null;
-        scheduleApply();
-      }, META_APPLY_INTERVAL_MS);
-    }
-
-    function updateMetaProgress() {
-      if (!metaProgressEl) return;
-      const remaining = metaCheckTotal - metaCheckDone;
-      if (metaCheckTotal === 0 || remaining <= 0) {
-        metaProgressEl.hidden = true;
-        metaProgressEl.textContent = '';
-        if (metaCheckTotal > 0 && remaining <= 0) {
-          metaCheckTotal = 0;
-          metaCheckDone = 0;
-        }
-      } else {
-        metaProgressEl.hidden = false;
-        metaProgressEl.textContent = ` · checking ${metaCheckDone}/${metaCheckTotal}…`;
-      }
-    }
-
-    function pumpMetaQueue() {
-      while (metaInFlight < MAX_META_CONCURRENT && metaQueue.length) {
-        const task = metaQueue.shift();
-        metaInFlight++;
-        Promise.resolve().then(task).finally(() => { metaInFlight--; pumpMetaQueue(); });
-      }
-    }
-
-    function queueMetaForRoutes(candidates) {
-      const runId = metaRunId;
-      let queued = 0;
-      for (const r of candidates) {
-        if (ROUTE_META_CACHE.has(r.id)) continue;
-        if (!r.crag_param_id || !r.param_id) continue;
-        const href = `/crags/${encodeURIComponent(r.crag_param_id)}/routes/${encodeURIComponent(r.param_id)}`;
-        ROUTE_META_CACHE.set(r.id, null);
-        queued++;
-        metaQueue.push(async () => {
-          const meta = await fetchRouteMeta(href);
-          if (meta) {
-            ROUTE_META_CACHE.set(r.id, { video: meta.video, comment: meta.comment, t: Date.now() });
-            persistMetaCacheSoon();
-          } else {
-            ROUTE_META_CACHE.delete(r.id);
-          }
-          if (runId === metaRunId) {
-            metaCheckDone++;
-            updateMetaProgress();
-          }
-          // Batched via scheduleApplyFromMeta — routes flip out in ~400ms
-          // bursts during a fetch storm instead of per-completion.
-          scheduleApplyFromMeta();
-        });
-      }
-      if (queued > 0) {
-        metaCheckTotal += queued;
-        updateMetaProgress();
-        pumpMetaQueue();
-      }
-    }
-
-    function cancelMetaQueue() {
-      // Drop pending work and invalidate in-flight counter updates.
-      metaQueue.length = 0;
-      metaCheckTotal = 0;
-      metaCheckDone = 0;
-      metaRunId++;
-      updateMetaProgress();
-    }
+    // Per-route meta (video/comment) loading. Queued for the currently
+    // visible slice each time apply() runs while the filter is active, with
+    // a visible progress count. Results are persisted (7-day TTL) so
+    // subsequent sessions resolve from cache.
+    const { queueMetaForRoutes, cancelMetaQueue } = createMetaQueue({
+      progressEl: panel.querySelector('[data-tt-xf-meta-progress]'),
+      metaCache: ROUTE_META_CACHE,
+      fetchMeta: fetchRouteMeta,
+      persistSoon: persistMetaCacheSoon,
+      onApply: () => scheduleApply(),
+    });
 
     // Lazy image loading via batched API.
-    const BATCH_SIZE = 100;        // max ids per /api/web01/search/photos request
-    const BATCH_DEBOUNCE_MS = 80;  // coalesce intersections briefly into one request
-    const MAX_BATCH_CONCURRENT = 3;
-    const pendingIds = new Set();
-    const idToImgs = new Map();    // id -> Set<HTMLImageElement>
-    let batchTimer = null;
-    let inFlightBatches = 0;
-    const queuedBatches = [];
-    function runNextBatch() {
-      while (inFlightBatches < MAX_BATCH_CONCURRENT && queuedBatches.length) {
-        const slice = queuedBatches.shift();
-        inFlightBatches++;
-        fetchPhotosBatch(slice)
-          .then(map => { for (const id of slice) applyImageUrl(id, map.get(id) || ''); })
-          .finally(() => { inFlightBatches--; runNextBatch(); });
-      }
-    }
-
-    function applyImageUrl(id, url) {
-      ROUTE_IMG_CACHE.set(id, url || '');
-      const imgs = idToImgs.get(id);
-      if (!imgs) return;
-      if (url) {
-        for (const img of imgs) if (img.isConnected) img.src = url;
-      }
-      idToImgs.delete(id);
-    }
-
-    async function flushBatch() {
-      batchTimer = null;
-      if (!pendingIds.size) return;
-      const ids = [...pendingIds];
-      pendingIds.clear();
-      for (let i = 0; i < ids.length; i += BATCH_SIZE) {
-        queuedBatches.push(ids.slice(i, i + BATCH_SIZE));
-      }
-      runNextBatch();
-    }
-    function queueImage(id, img) {
-      if (ROUTE_IMG_CACHE.has(id)) {
-        const url = ROUTE_IMG_CACHE.get(id);
-        if (url && img.isConnected) img.src = url;
-        return;
-      }
-      let bucket = idToImgs.get(id);
-      if (!bucket) { bucket = new Set(); idToImgs.set(id, bucket); }
-      bucket.add(img);
-      pendingIds.add(id);
-      if (!batchTimer) batchTimer = setTimeout(flushBatch, BATCH_DEBOUNCE_MS);
-    }
-
-    const imgObserver = ('IntersectionObserver' in window) ? new IntersectionObserver((entries) => {
-      for (const e of entries) {
-        if (!e.isIntersecting) continue;
-        const img = e.target;
-        imgObserver.unobserve(img);
-        const id = Number(img.getAttribute('data-bc-img-id'));
-        if (id) queueImage(id, img);
-      }
-    }, { rootMargin: '400px 0px' }) : null;
-
-    function observeRowImg(tr) {
-      const img = tr.querySelector && tr.querySelector('img[data-bc-img-id]');
-      if (!img || img.dataset.bcObserved === '1') return;
-      img.dataset.bcObserved = '1';
-      const id = Number(img.getAttribute('data-bc-img-id'));
-      if (ROUTE_IMG_CACHE.has(id)) {
-        const url = ROUTE_IMG_CACHE.get(id);
-        if (url) img.src = url;
-        return;
-      }
-      if (imgObserver) imgObserver.observe(img);
-      else queueImage(id, img);
-    }
+    const { observeRowImg, unobserveRowImg } = createImageLazyLoader({
+      imgCache: ROUTE_IMG_CACHE,
+      fetchBatch: fetchPhotosBatch,
+    });
 
     // Used during keyed reconcile to build single rows. tbody is the only
     // element whose innerHTML setter parses `<tr>` correctly.
@@ -1504,10 +1703,6 @@
       return _rowFactory.firstElementChild;
     }
 
-    // Keyed diff between the current tbody and `filtered`. Rows that survive
-    // keep their DOM node (and image observer state). Only added/removed/moved
-    // rows pay DOM cost. First chunk runs sync; the tail streams in via ric so
-    // long lists don't block input handlers.
     function updateMoreButton(remaining) {
       if (!ourTbody) return;
       const existing = ourTbody.querySelector('tr[data-tt-xf-more]');
@@ -1530,7 +1725,7 @@
     }
 
     // Reflect whether a route is already on the user's todo / done list on the
-    // row's quick-action buttons. Called for every placed row in reconcileTbody,
+    // row's quick-action buttons. Called for every row the reconciler places,
     // so both freshly-built and reused rows pick up state changes (e.g. after
     // loadUserLists resolves or a successful add-ascent submit).
     function applyRowActionStates(tr) {
@@ -1558,75 +1753,22 @@
       }
     }
 
-    function reconcileTbody(filtered) {
-      const tbody = ourTbody;
-      const have = new Map();
-      for (let i = 0, n = tbody.children.length; i < n; i++) {
-        const tr = tbody.children[i];
-        const id = +tr.dataset.routeId;
-        if (id) have.set(id, tr);
-      }
-      const wantIds = new Set();
-      for (let i = 0, n = filtered.length; i < n; i++) wantIds.add(filtered[i].id);
+    const rowReconciler = createRowReconciler({
+      getTbody: () => ourTbody,
+      getTotal: () => routes.length,
+      buildRowEl,
+      observeRowImg,
+      unobserveRowImg,
+      applyRowActionStates,
+      countEl,
+    });
 
-      for (const [id, tr] of have) {
-        if (!wantIds.has(id)) {
-          tr.remove();
-          have.delete(id);
-        }
-      }
-
-      if (filtered.length === 0) {
-        renderingRows = false;
-        return;
-      }
-
-      function placeRange(start, end) {
-        let prev = start === 0 ? null : have.get(filtered[start - 1].id) || null;
-        for (let i = start; i < end; i++) {
-          const r = filtered[i];
-          let tr = have.get(r.id);
-          if (!tr) {
-            tr = buildRowEl(r);
-            have.set(r.id, tr);
-          }
-          const expected = prev ? prev.nextSibling : tbody.firstChild;
-          if (tr !== expected) tbody.insertBefore(tr, expected);
-          observeRowImg(tr);
-          applyRowActionStates(tr);
-          prev = tr;
-        }
-      }
-
-      let cancelled = false;
-      cancelRender = () => { cancelled = true; renderingRows = false; };
-      renderingRows = true;
-
-      const FIRST = Math.min(FIRST_CHUNK, filtered.length);
-      placeRange(0, FIRST);
-      let cursor = FIRST;
-
-      if (cursor >= filtered.length) {
-        cancelRender = null;
-        renderingRows = false;
-        return;
-      }
-
-      const tick = () => {
-        if (cancelled) return;
-        const end = Math.min(cursor + RENDER_CHUNK, filtered.length);
-        placeRange(cursor, end);
-        cursor = end;
-        countEl.textContent = ` ${cursor}/${filtered.length}…`;
-        if (cursor < filtered.length) {
-          ric(tick);
-        } else {
-          countEl.textContent = ` ${filtered.length}/${routes.length}`;
-          cancelRender = null;
-          renderingRows = false;
-        }
-      };
-      ric(tick);
+    function updateListsStatus() {
+      const statusEl = panel.querySelector('[data-tt-xf-lists-status]');
+      if (!statusEl) return;
+      const t = todoSet ? todoSet.size : '…';
+      const d = doneSet ? doneSet.size : '…';
+      statusEl.textContent = `${t} todo · ${d} done`;
     }
 
     function loadUserLists() {
@@ -1638,27 +1780,18 @@
       }
       persistUsername(user);
       if (statusEl) statusEl.textContent = `loading ${user}'s lists…`;
-
-      function updateStatus() {
-        if (!statusEl) return;
-        const t = todoSet ? todoSet.size : '…';
-        const d = doneSet ? doneSet.size : '…';
-        statusEl.textContent = `${t} todo · ${d} done`;
-      }
       // Each list populates independently — UI becomes usable as soon as either lands.
       fetchRouteKeySet(`/climbers/${encodeURIComponent(user)}/ascents/todo`, userListsAbort.signal)
         .then(s => {
           todoSet = s || new Set();
-          log(`user ${user}: ${todoSet.size} on todo`);
-          updateStatus();
+          updateListsStatus();
           renderedKey = '';
           scheduleApply();
         });
       fetchRouteKeySet(`/climbers/${encodeURIComponent(user)}/ascents`, userListsAbort.signal)
         .then(s => {
           doneSet = s || new Set();
-          log(`user ${user}: ${doneSet.size} done`);
-          updateStatus();
+          updateListsStatus();
           renderedKey = '';
           scheduleApply();
         });
@@ -1734,12 +1867,7 @@
             if (!doneSet) doneSet = new Set();
             doneSet.add(key);
           }
-          const statusEl = panel.querySelector('[data-tt-xf-lists-status]');
-          if (statusEl) {
-            const t = todoSet ? todoSet.size : '…';
-            const d = doneSet ? doneSet.size : '…';
-            statusEl.textContent = `${t} todo · ${d} done`;
-          }
+          updateListsStatus();
           renderedKey = '';
           scheduleApply();
         },
@@ -1767,7 +1895,9 @@
 
         hideNativeFilters(null, state.hideNative);
         hideReadmore();
-        // Promo walk is expensive (body * scan); throttle to a few seconds.
+        // Promo walk is expensive (body * scan); throttle to one scan per
+        // PROMO_SCAN_INTERVAL_MS (500ms). The fallback body scan inside
+        // hidePromos additionally stops itself after a few empty passes.
         if (Date.now() - lastPromoScan > PROMO_SCAN_INTERVAL_MS) {
           hidePromos();
           lastPromoScan = Date.now();
@@ -1807,8 +1937,10 @@
         // Two-level fingerprint: filterFp resets pagination when the filter
         // outcome shifts; renderFp drives whether reconcile runs.
         const sortKey = state.sorts.join('>');
+        // Fingerprint the full ordered id list — sampled fingerprints can
+        // collide across distinct filter outcomes and skip the reconcile.
         const filterFp = filtered.length === 0 ? '0' :
-          `${filtered.length}|${sortKey}|${filtered[0].id}|${filtered[filtered.length - 1].id}|${filtered.slice(0, 5).map(r => r.id).join(',')}`;
+          `${sortKey}|${filtered.map(r => r.id).join(',')}`;
         if (filterFp !== lastFilterFp) {
           visibleLimit = DEFAULT_VISIBLE;
           lastFilterFp = filterFp;
@@ -1819,8 +1951,8 @@
 
         if (fp !== renderedKey) {
           renderedKey = fp;
-          if (cancelRender) { cancelRender(); cancelRender = null; }
-          reconcileTbody(visible);
+          rowReconciler.cancel();
+          rowReconciler.reconcile(visible);
           updateMoreButton(filtered.length - visibleCount);
         }
         if (needMeta) queueMetaForRoutes(visible); else cancelMetaQueue();
@@ -1848,51 +1980,11 @@
       }, wait);
     }
 
-    // Dual-range slider: drive both inputs entirely via JS pointer events on the wrapper.
-    function setupDualDrag(wrapper) {
-      const inputs = wrapper.querySelectorAll('input[type="range"]');
-      if (inputs.length < 2) return;
-      const [a, b] = inputs;
-      let active = null;
-
-      function valueFromEvent(e) {
-        const rect = wrapper.getBoundingClientRect();
-        const pct = (e.clientX - rect.left) / Math.max(1, rect.width);
-        const min = +a.min, max = +a.max;
-        return Math.round(min + Math.max(0, Math.min(1, pct)) * (max - min));
-      }
-      function setVal(input, val) {
-        if (+input.value === val) return;
-        input.value = String(val);
-        input.dispatchEvent(new Event('input', { bubbles: true }));
-      }
-
-      wrapper.addEventListener('pointerdown', (e) => {
-        e.preventDefault();
-        const val = valueFromEvent(e);
-        const da = Math.abs(val - +a.value);
-        const db = Math.abs(val - +b.value);
-        active = da <= db ? a : b;
-        setVal(active, val);
-        try { wrapper.setPointerCapture(e.pointerId); } catch (_) {}
-      });
-      wrapper.addEventListener('pointermove', (e) => {
-        if (!active) return;
-        setVal(active, valueFromEvent(e));
-      });
-      function endDrag(e) {
-        if (!active) return;
-        try { wrapper.releasePointerCapture(e.pointerId); } catch (_) {}
-        active = null;
-      }
-      wrapper.addEventListener('pointerup', endDrag);
-      wrapper.addEventListener('pointercancel', endDrag);
-    }
     setupDualDrag(gradeWrap);
     setupDualDrag(ascWrap);
 
     const mo = new MutationObserver(() => {
-      if (renderingRows) return; // our own row inserts; ignore.
+      if (rowReconciler.isRendering()) return; // our own row inserts; ignore.
       if (!ourTable || !document.contains(ourTable)) { renderedKey = ''; scheduleApply(); return; }
       if (!readmoreHidden && document.querySelector('a.readmore-toggle')) { scheduleApply(); return; }
       if (!panel.parentNode) { attachPanel(panel); }

@@ -23,7 +23,7 @@
       <button type="button" class="mc-tab" data-tab="tierlists">To-do tierlists</button>
     </nav>
 
-    <section class="mc-status" id="mc-status">
+    <section class="mc-status" id="mc-status" role="status" aria-live="polite">
       <div class="mc-spinner" hidden id="mc-spinner"></div>
       <div class="mc-status-text" id="mc-status-text">Detecting account…</div>
     </section>
@@ -123,9 +123,10 @@
     </div>
 
     <footer class="mc-footer">
-      <span id="mc-cache-info"></span>
+      <span id="mc-cache-info" aria-live="polite"></span>
     </footer>
 
+    <script src="shared.js"></script>
     <script src="mycrags.js"></script>
   </body>
 </html>
