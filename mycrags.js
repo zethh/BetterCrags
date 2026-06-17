@@ -822,9 +822,60 @@
     for (const [key, { label, count }] of ordered) make(key, `${label} (${count})`);
   }
 
+  // Hover tooltip for the "N todo" pill: lists each open todo's route name and
+  // grade. The tooltip is appended to <body> (position:fixed) because the card
+  // it lives in is overflow:hidden and would clip an in-flow popup.
+  const nextTodosByCrag = new Map(); // crag id → its (genre-filtered) todos
+  let nextTooltipEl = null;
+  let nextTooltipWired = false;
+
+  function hideNextTooltip() {
+    if (nextTooltipEl) { nextTooltipEl.remove(); nextTooltipEl = null; }
+  }
+  function showNextTooltip(pill) {
+    const todos = nextTodosByCrag.get(pill.getAttribute('data-bc-crag'));
+    if (!todos || !todos.length) return;
+    hideNextTooltip();
+    const CAP = 25;
+    const sorted = todos.slice().sort((a, b) => (b.gradeInt || 0) - (a.gradeInt || 0));
+    const rows = sorted.slice(0, CAP).map(t => {
+      const g = t.gradeLabel || (t.gradeInt ? intToLabel(t.gradeInt, t.genre) : '') || '—';
+      return `<div class="row"><span class="r">${escapeHtml(t.routeName || 'Unnamed route')}</span><span class="g">${escapeHtml(g)}</span></div>`;
+    }).join('');
+    const more = sorted.length > CAP ? `<div class="more">+${sorted.length - CAP} more…</div>` : '';
+    const tip = document.createElement('div');
+    tip.className = 'mc-next-tooltip';
+    tip.innerHTML = `<div class="hd">${todos.length} open todo${todos.length === 1 ? '' : 's'}</div>${rows}${more}`;
+    document.body.appendChild(tip);
+    nextTooltipEl = tip;
+    const r = pill.getBoundingClientRect();
+    const tw = tip.offsetWidth, th = tip.offsetHeight;
+    let left = Math.round(r.left);
+    if (left + tw > window.innerWidth - 8) left = Math.max(8, window.innerWidth - 8 - tw);
+    let top = Math.round(r.bottom + 6);
+    if (top + th > window.innerHeight - 8) top = Math.max(8, Math.round(r.top - 6 - th));
+    tip.style.left = `${left}px`;
+    tip.style.top = `${top}px`;
+  }
+
   function renderNext() {
     const card = $('#mc-next-card');
     const list = $('#mc-next-list');
+    // Wire the hover tooltip once; #mc-next-list persists across re-renders.
+    if (!nextTooltipWired) {
+      nextTooltipWired = true;
+      list.addEventListener('mouseover', (e) => {
+        const pill = e.target.closest('.mc-next-todo-pill');
+        if (pill && list.contains(pill)) showNextTooltip(pill);
+      });
+      list.addEventListener('mouseout', (e) => {
+        const pill = e.target.closest('.mc-next-todo-pill');
+        if (pill && (!e.relatedTarget || !pill.contains(e.relatedTarget))) hideNextTooltip();
+      });
+      window.addEventListener('scroll', hideNextTooltip, true);
+    }
+    nextTodosByCrag.clear();
+    hideNextTooltip();
     const genre = state.activeGenreNext;
     renderTabs($('#mc-next-tabs'), genre, (g) => { state.activeGenreNext = g; renderNext(); });
     const genreItems = [];
@@ -849,6 +900,7 @@
     }
     list.innerHTML = top.map(({ c, todos, doneAtCrag, hardestTodoGi, score }) => {
       const name = c.name || c.id;
+      nextTodosByCrag.set(c.id, todos);
       const totalKnown = c.total != null && c.total > 0;
       const pct = totalKnown ? Math.min(100, (doneAtCrag / c.total) * 100) : null;
       const hardestG = hardestTodoGi
@@ -858,7 +910,7 @@
         <div class="mc-next-item">
           <div class="n"><a href="https://thetopo.com/crags/${escapeHtml(encodeURIComponent(c.id))}" target="_blank" rel="noopener">${escapeHtml(name)}</a>${c.area ? `<span class="area">${escapeHtml(c.area)}</span>` : ''}</div>
           <div class="b">
-            <span class="pill">${todos.length} todo</span>
+            <span class="pill mc-next-todo-pill" data-bc-crag="${escapeHtml(c.id)}">${todos.length} todo</span>
             <span class="pill">${doneAtCrag} done${totalKnown ? ` / ${c.total}` : ''}</span>
             ${hardestG ? `<span class="pill">top todo ${escapeHtml(hardestG)}</span>` : ''}
           </div>

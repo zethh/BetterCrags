@@ -234,6 +234,55 @@ a:hover { color: #8fc7ff; text-decoration: underline; }
   border-radius: 10px;
   padding: 2px 8px;
 }
+.mc-next-item .b .mc-next-todo-pill { cursor: help; }
+
+/* Hover tooltip listing a crag's open todos (route name + grade) */
+.mc-next-tooltip {
+  position: fixed;
+  z-index: 1000;
+  pointer-events: none;
+  min-width: 180px;
+  max-width: 320px;
+  max-height: 60vh;
+  overflow: hidden;
+  background: var(--bg-elev-3);
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.35);
+  padding: 8px 10px;
+  font-size: 12px;
+  color: var(--text);
+}
+.mc-next-tooltip .hd {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-muted);
+  margin-bottom: 6px;
+}
+.mc-next-tooltip .row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 2px 0;
+}
+.mc-next-tooltip .row .r {
+  color: var(--text-strong);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mc-next-tooltip .row .g {
+  flex: 0 0 auto;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+}
+.mc-next-tooltip .more {
+  margin-top: 4px;
+  color: var(--text-muted);
+  font-style: italic;
+}
 .mc-next-item .score {
   font-size: 11px;
   color: var(--text-muted);
