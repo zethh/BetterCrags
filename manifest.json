@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "BetterCrags",
-  "version": "0.33.0",
+  "version": "0.34.0",
   "description": "Adds exclude-feature filters, a minimum-ascents filter, a My Crags dashboard (todo/done/completion% per crag, plus a To-do tierlists tab: drag todos into S/A/B/C tiers, filter by genre/area/grade, save & share named lists), hides premium upsell promos, and adds a site-wide dark mode for thetopo.com.",
   "permissions": ["storage"],
   "host_permissions": ["https://thetopo.com/*"],
@@ -30,6 +30,14 @@
         "https://thetopo.com/crags/*/routelist*"
       ],
       "js": ["shared.js", "content.js"],
+      "css": ["panel.css"],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "https://thetopo.com/crags/*/routes/*"
+      ],
+      "js": ["shared.js", "routepage.js"],
       "css": ["panel.css"],
       "run_at": "document_idle"
     },

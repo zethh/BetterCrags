@@ -9,6 +9,7 @@ A personal-use Chrome extension that augments [thetopo.com](https://thetopo.com)
 - **Todo / Done** — filter against your own todo list and completed ascents (auto-fetched when you're logged in)
 - **My Crags dashboard** — a standalone page (button in the filter panel) with: where-to-go-next ranking by open todos, per-crag completion % across all your visited areas, grade firsts (the crag where each grade became real for you), and assorted fun stats
 - **To-do tierlists** — a tab on the My Crags dashboard: drag your todos (or any route found via search, or a whole area/crag browse) into S/A/B/C tiers; lists are saved locally and can be exported/imported as JSON
+- **Add to a list while browsing** — every route row has a `+ list` button alongside `+ todo` / `+ done`, and each individual route page gets one too: drop the route straight into any custom tier-list (or spin up a new list on the spot) without leaving the page. Open dashboard tabs pick up the change live
 - **Dark mode** — a site-wide dark theme for thetopo.com, toggled from the popup
 - **Name search**, sort by rating / ascents / grade / name, dual-thumb grade slider, 3-star min rating
 - **Filters everything client-side** over all 5400+ routes per area — no more clicking "Show more"

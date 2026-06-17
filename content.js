@@ -44,7 +44,7 @@
   // 27crags-style numeric → climbing label. Source values empirically chosen.
   // Boulder uses Font, sport/trad uses French.
   // Grade tables + escapeHtml live in shared.js (loaded first via manifest).
-  const { FONT_GRADES, FRENCH_GRADES, escapeHtml } = window.BCShared;
+  const { FONT_GRADES, FRENCH_GRADES, escapeHtml, gradeLabelFor, openListMenu } = window.BCShared;
 
   const SORT_OPTIONS = [
     ['rating_desc', 'Rating ↓'],
@@ -747,15 +747,6 @@
     return fetchRouteListStore(`/areas/${encodeURIComponent(areaParamId)}/routelist`, `area "${areaParamId}"`);
   }
 
-  function gradeLabelFor(gi, genre) {
-    const table = genre === 'Boulder' ? FONT_GRADES : FRENCH_GRADES;
-    let best = String(gi), bestD = Infinity;
-    for (const [v, l] of table) {
-      const d = Math.abs(v - gi);
-      if (d < bestD) { bestD = d; best = l; }
-    }
-    return best;
-  }
 
   // ── "Add to todo" / "Mark as done" modal ────────────────────────────
   // Thetopo's add-ascent endpoint (/climbers/<user>/ascents/new) returns a
@@ -939,7 +930,7 @@
   // when the routes array itself is replaced (background-fetch expansion).
   // Bump when the row template's cell count or structure changes so stale
   // cached HTML from older builds doesn't survive into a new column layout.
-  const ROW_HTML_VERSION = 'v3';
+  const ROW_HTML_VERSION = 'v4';
   const ROW_HTML_CACHE = new Map(); // `${version}:${routeId}` -> htmlString
 
   function rowHtml(route, noImageUrl) {
@@ -973,7 +964,7 @@
       <td class="hidden-xs"><div class="tags">${tagsHtml}</div></td>
       <td class="hidden-xs"><span class="stars star-span">${starsHtml}</span></td>
       <td class="hidden-xs"><a class="lfont" href="${cragHref}">${cragName}</a></td>
-      <td class="hidden-xs tt-xf-row-actions-cell"><button type="button" class="tt-xf-row-act" data-bc-act="todo" data-bc-route-id="${rid}" data-bc-route-key="${routeKey}" title="Add to my todo list">+ todo</button><button type="button" class="tt-xf-row-act" data-bc-act="done" data-bc-route-id="${rid}" data-bc-route-key="${routeKey}" title="Log as done">+ done</button></td>
+      <td class="hidden-xs tt-xf-row-actions-cell"><button type="button" class="tt-xf-row-act" data-bc-act="todo" data-bc-route-id="${rid}" data-bc-route-key="${routeKey}" title="Add to my todo list">+ todo</button><button type="button" class="tt-xf-row-act" data-bc-act="done" data-bc-route-id="${rid}" data-bc-route-key="${routeKey}" title="Log as done">+ done</button><button type="button" class="tt-xf-row-act" data-bc-act="list" data-bc-route-id="${rid}" data-bc-route-key="${routeKey}" title="Add to a custom tier-list">+ list</button></td>
     </tr>`;
     ROW_HTML_CACHE.set(cacheKey, html);
     return html;
@@ -1840,9 +1831,14 @@
     }
 
     function handleRowAction(btn) {
-      const mode = btn.dataset.bcAct; // 'todo' | 'done'
+      const mode = btn.dataset.bcAct; // 'todo' | 'done' | 'list'
       const routeId = +btn.dataset.bcRouteId;
-      if (!routeId || (mode !== 'todo' && mode !== 'done')) return;
+      if (!routeId) return;
+      const route = routes.find(r => r.id === routeId);
+      if (!route) { warn('route lookup failed', routeId); return; }
+      // Custom tier-lists are stored locally — no login needed.
+      if (mode === 'list') { openListMenu(btn, route); return; }
+      if (mode !== 'todo' && mode !== 'done') return;
       const user = detectUsername();
       if (!user) {
         warnEl.hidden = false;
@@ -1850,8 +1846,6 @@
         setTimeout(() => { warnEl.hidden = true; }, 4000);
         return;
       }
-      const route = routes.find(r => r.id === routeId);
-      if (!route) { warn('route lookup failed', routeId); return; }
       const key = `${route.crag_param_id}/${route.param_id}`;
       const label = `${route.name}${route.crag_name ? ` (${route.crag_name})` : ''}`;
       openAscentModal({
