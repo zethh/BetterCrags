@@ -1052,6 +1052,7 @@
         gradeLabel: r.gradeLabel || (gradeInt ? intToLabel(gradeInt, genre) : ''),
         gradeInt,
         bucket: bucketOf(genre),
+        genreKnown: !!genre,
         rating: s.rating || 0,
         ascents: s.ascents || 0,
         hasStats: !!stats,
@@ -1080,6 +1081,7 @@
       gradeLabel: it.gradeLabel || (gradeInt ? intToLabel(gradeInt, genre) : ''),
       gradeInt,
       bucket: bucketOf(genre),
+      genreKnown: !!genre,
       rating: Number(s.rating || it.rating) || 0,
       ascents: Number(s.ascents || it.ascents) || 0,
       hasStats: !!stats || it.rating != null,
@@ -1095,8 +1097,14 @@
 
   function filterItems(items, list) {
     return items.filter(it => {
-      if (list.genre !== 'all' && it.bucket !== list.genre) return false;
-      if (list.areas && !list.areas.includes(it.area || '')) return false;
+      // Genre: only exclude a *known* genre mismatch. A todo whose genre never
+      // resolved (grade in a system we don't parse, or not yet enriched) buckets
+      // to 'Other' — but it must not be silently hidden by a Boulder/Sport tab,
+      // so unknown-genre items stay visible under every genre filter.
+      if (list.genre !== 'all' && it.genreKnown && it.bucket !== list.genre) return false;
+      // Area: likewise only exclude a *known* area mismatch. An unresolved area
+      // ('') stays visible under any area selection rather than disappearing.
+      if (list.areas && it.area && !list.areas.includes(it.area)) return false;
       if (list.gradeMin != null || list.gradeMax != null) {
         if (!it.gradeInt) return false; // unknown grade is excluded once a grade filter is set
         if (list.gradeMin != null && it.gradeInt < list.gradeMin) return false;
@@ -1329,16 +1337,23 @@
     const todoKeys = new Set(state.todo.map(r => r.key));
     items.forEach(it => { it.done = doneKeys.has(it.key); it.onTodo = todoKeys.has(it.key); });
 
-    // Lazily fetch ratings/ascents for stored items we don't know yet.
-    if (stored) {
-      const missing = list.items.map(i => i.key).filter(k => !state.routeStats[k] && !state.enrichTried.has(k));
-      if (missing.length) {
-        const gen = renderGen;
-        enrichRouteStats(list.items.map(i => i.key)).then(() => {
-          // Stale-result guard: skip if a newer load started or the list changed.
-          if (gen === renderGen && activeList() === list) renderTierArea(list);
-        });
-      }
+    // Lazily fetch ratings/ascents for items we don't know yet. enrichRouteStats
+    // resolves each crag's area (fetching the crag page when unknown) before
+    // pulling per-route stats, so it backfills genre/grade/area for todos that
+    // enrichTodoStats skipped (their crag had no known areaParamId) — otherwise
+    // those todos keep an unknown genre/area and get filtered away.
+    const enrichKeys = stored ? list.items.map(i => i.key) : state.todo.map(r => r.key);
+    const missing = enrichKeys.filter(k => !state.routeStats[k] && !state.enrichTried.has(k));
+    if (missing.length) {
+      const gen = renderGen;
+      enrichRouteStats(enrichKeys).then(() => {
+        // Stale-result guard: skip if a newer load started or the list changed.
+        if (gen !== renderGen || activeList() !== list) return;
+        // Live todo lists: full re-render so genre tabs + area chips pick up the
+        // newly-resolved genres/areas. Stored lists: tier-only re-render to keep
+        // the add-search box (which the user may be typing in) from rebuilding.
+        if (stored) renderTierArea(list); else renderBoard();
+      });
     }
 
     const opts = { markers: stored, removable: stored };
