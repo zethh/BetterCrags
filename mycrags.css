@@ -140,6 +140,68 @@ a:hover { color: #8fc7ff; text-decoration: underline; }
   font-size: 12px;
   color: var(--text-muted);
 }
+.mc-profile-controls {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  flex-wrap: wrap;
+  margin-top: 8px;
+}
+.mc-profile-controls label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+.mc-profile-controls select {
+  background: var(--bg-elev-2);
+  color: var(--text);
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  padding: 3px 6px;
+  font: inherit;
+  font-size: 12px;
+}
+.mc-profile-body { padding: 14px 16px 16px; }
+.mc-profile-insight {
+  color: var(--text);
+  font-size: 13px;
+  margin-bottom: 12px;
+}
+.mc-profile-insight b { color: var(--text-strong); }
+.mc-profile-insight span { color: var(--text-muted); font-size: 12px; margin-left: 6px; }
+.mc-profile-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  gap: 10px;
+}
+.mc-profile-group {
+  margin: 0;
+  background: var(--bg-elev-2);
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  padding: 9px 8px 8px;
+  text-align: center;
+}
+.mc-profile-group h3 {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: .07em;
+  text-transform: uppercase;
+}
+.mc-radar { width: 178px; height: 178px; max-width: 100%; overflow: visible; }
+.mc-radar .grid { fill: none; stroke: var(--border-strong); stroke-width: 1; }
+.mc-radar .grid.outer { stroke: var(--text-muted); opacity: .65; }
+.mc-radar line { stroke: var(--border); stroke-width: 1; }
+.mc-radar .shape { fill: rgba(44, 125, 217, .28); stroke: #6db3f2; stroke-width: 2; }
+.mc-radar text { fill: var(--text-muted); font-size: 8px; }
+.mc-profile-rank { display: flex; flex-wrap: wrap; justify-content: center; gap: 3px 7px; font-size: 11px; color: var(--text-muted); }
+.mc-profile-rank span { white-space: nowrap; }
+.mc-profile-rank b { color: var(--text); font-variant-numeric: tabular-nums; }
+.mc-profile-empty { color: var(--text-muted); font-size: 13px; }
 .mc-toolbar {
   display: flex; gap: 10px; align-items: center;
   margin-top: 8px;

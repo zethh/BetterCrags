@@ -9,11 +9,22 @@
   const ASCENTS_CACHE_KEY = 'bc_mycrags_ascents_v1';
   const CRAG_FETCH_CACHE_KEY = 'bc_mycrags_crag_fetched_v4'; // v4: capture area param_id for routelist fetches
   const ROUTE_STATS_KEY = 'bc_route_stats_v1';  // routeKey → { rating, ascents, gradeInt, genre }
+  const ROUTE_FEATURES_KEY = 'bc_route_features_v1'; // routeKey → { crimpers, jugs, ... }
   const BOARD_KEY = 'bc_project_board_v2';       // tier-list board: named lists + global notes
   const BOARD_KEY_V1 = 'bc_project_board_v1';    // legacy single-list board (migrated on load)
   const CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 1 day for ascents (cheap to refetch)
   const CRAG_PAGE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
   const ROUTE_STATS_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+
+  // Kept in sync with the feature filters on the routelist. These booleans are
+  // available in the area RouteList store, but not in ascent-list rows.
+  const FEATURE_GROUPS = [
+    ['Hold type', [['crimpers', 'Crimps'], ['slopers', 'Slopers'], ['jugs', 'Jugs'], ['pockets', 'Pockets'], ['tufas', 'Tufas'], ['crack', 'Crack']]],
+    ['Wall angle', [['roof', 'Roof'], ['overhang', 'Overhang'], ['vertical', 'Vertical'], ['slab', 'Slab']]],
+    ['Style', [['fingery', 'Fingery'], ['powerful', 'Powerful'], ['dyno', 'Dyno'], ['endurance', 'Endurance'], ['technical', 'Technical'], ['mental', 'Mental'], ['traverse', 'Traverse']]],
+    ['Other', [['sitstart', 'Sit start'], ['topslasthold', 'Top/last hold'], ['tradgear_required', 'Trad gear'], ['dangerous', 'Dangerous']]],
+  ];
+  const FEATURE_KEYS = FEATURE_GROUPS.flatMap(([, tags]) => tags.map(([key]) => key));
 
   // Grade tables + escapeHtml live in shared.js (loaded by mycrags.html first).
   const { FONT_GRADES, FRENCH_GRADES, escapeHtml } = window.BCShared;
@@ -424,6 +435,44 @@
     state.routeStats = cache.stats;
   }
 
+  // Fetch feature tags only for routes the user has sent. We cache an area's
+  // lookup time separately so this remains inexpensive on subsequent opens.
+  function enrichDoneFeatures(force) {
+    return serialized(() => enrichDoneFeaturesNow(force));
+  }
+  async function enrichDoneFeaturesNow(force) {
+    const doneKeys = new Set(state.done.map(r => r.key));
+    if (!doneKeys.size) { state.routeFeatures = {}; return; }
+    const cache = (await get(ROUTE_FEATURES_KEY)) || { features: {}, areas: {} };
+    cache.features = cache.features || {}; cache.areas = cache.areas || {};
+    const now = Date.now();
+    const areaIds = new Set();
+    for (const r of state.done) {
+      const total = state.cragTotals[r.cragId];
+      if (total && total.areaParamId) areaIds.add(total.areaParamId);
+    }
+    const stale = [...areaIds].filter(id => force || !cache.areas[id] || (now - cache.areas[id]) > ROUTE_STATS_TTL_MS);
+    if (stale.length) {
+      let completed = 0;
+      setStatus(`Reading climb features (0/${stale.length} areas)…`, true);
+      for (const areaId of stale) {
+        const routes = await fetchAreaRoutes(areaId);
+        for (const route of routes) {
+          const key = `${route.crag_param_id || ''}/${route.param_id || ''}`;
+          if (!doneKeys.has(key)) continue;
+          const features = {};
+          for (const tag of FEATURE_KEYS) if (route[tag]) features[tag] = true;
+          cache.features[key] = features;
+        }
+        cache.areas[areaId] = now;
+        completed++;
+        setStatus(`Reading climb features (${completed}/${stale.length} areas)…`, true);
+      }
+      await set(ROUTE_FEATURES_KEY, cache);
+    }
+    state.routeFeatures = cache.features;
+  }
+
   // thetopo's universal search. Returns mixed matches (routes, crags, areas),
   // normalised; crags/areas can be "browsed" to list all their routes.
   async function searchAll(query) {
@@ -600,8 +649,11 @@
     compareYear: null,    // 'YYYY' to compare against, or null
     selectedMonth: null,  // 1..12 or null
     activeGenreMonth: 'all', // 'all' | 'Boulder' | 'Sport' | 'Other'
+    profileFromYear: 'all',
+    profileToYear: 'all',
     selectedCragId: null, // crag spotlight
     routeStats: {},       // routeKey → { rating, ascents, gradeInt, genre }
+    routeFeatures: {},    // routeKey → { crimpers: true, ... }
     enrichTried: new Set(), // route keys we've already tried to enrich this session
     board: null,          // tier-list board (loaded from storage)
   };
@@ -748,6 +800,83 @@
       return (ia === -1 ? 99 : ia) - (ib === -1 ? 99 : ib);
     });
     return present;
+  }
+
+  // A grade step is 50 points in the source data. This gives a 6A roughly 1x
+  // credit, a 7A 1.6x, and an 8A 2.2x, while still allowing easier sends to
+  // count. It intentionally measures the features represented in sends, not
+  // an objective assessment of ability.
+  function profileGradeWeight(gradeInt) {
+    return Math.max(0.75, 0.75 + (Math.max(0, Number(gradeInt) || 0) - 300) / 500);
+  }
+
+  function profileYears() {
+    return [...new Set(state.done.map(r => (r.date || '').slice(0, 4)).filter(y => /^\d{4}$/.test(y)))].sort();
+  }
+
+  function profileRadarSvg(tags, values) {
+    const size = 190, center = 95, radius = 58, n = tags.length;
+    const point = (i, scale) => {
+      const angle = -Math.PI / 2 + (i * Math.PI * 2 / n);
+      return [center + Math.cos(angle) * radius * scale, center + Math.sin(angle) * radius * scale];
+    };
+    const poly = (scale) => tags.map((_, i) => point(i, scale).map(v => v.toFixed(1)).join(',')).join(' ');
+    const max = Math.max(1, ...values);
+    const shape = values.map((v, i) => point(i, Math.min(1, v / max)).map(x => x.toFixed(1)).join(',')).join(' ');
+    const axes = tags.map(([, label], i) => {
+      const [x, y] = point(i, 1.18);
+      const anchor = x < center - 8 ? 'end' : x > center + 8 ? 'start' : 'middle';
+      return `<line x1="${center}" y1="${center}" x2="${point(i, 1)[0].toFixed(1)}" y2="${point(i, 1)[1].toFixed(1)}" />` +
+        `<text x="${x.toFixed(1)}" y="${(y + 3).toFixed(1)}" text-anchor="${anchor}">${escapeHtml(label)}</text>`;
+    }).join('');
+    return `<svg class="mc-radar" viewBox="0 0 ${size} ${size}" role="img" aria-label="Feature profile radar"><polygon class="grid outer" points="${poly(1)}" /><polygon class="grid" points="${poly(.5)}" />${axes}<polygon class="shape" points="${shape}" /></svg>`;
+  }
+
+  function renderProfile() {
+    const card = $('#mc-profile-card');
+    const controls = $('#mc-profile-controls');
+    const body = $('#mc-profile-body');
+    const years = profileYears();
+    if (!state.done.length) { card.hidden = true; return; }
+    const options = (selected, label) => `<label>${label}<select data-mc-profile-${label.toLowerCase()}><option value="all"${selected === 'all' ? ' selected' : ''}>All time</option>${years.map(y => `<option value="${y}"${selected === y ? ' selected' : ''}>${y}</option>`).join('')}</select></label>`;
+    controls.innerHTML = `${options(state.profileFromYear, 'From')}${options(state.profileToYear, 'To')}`;
+
+    const rows = state.done.filter(r => {
+      const year = (r.date || '').slice(0, 4);
+      if (state.profileFromYear !== 'all' && (!year || year < state.profileFromYear)) return false;
+      if (state.profileToYear !== 'all' && (!year || year > state.profileToYear)) return false;
+      return true;
+    });
+    const groupHtml = [];
+    const allScores = [];
+    const taggedRoutes = rows.filter(r => FEATURE_KEYS.some(tag => (state.routeFeatures[r.key] || {})[tag])).length;
+    for (const [group, tags] of FEATURE_GROUPS) {
+      const values = tags.map(([tag]) => rows.reduce((sum, r) => (state.routeFeatures[r.key] || {})[tag] ? sum + profileGradeWeight(r.gradeInt) : sum, 0));
+      const max = Math.max(0, ...values);
+      if (!max) continue;
+      tags.forEach(([tag, label], i) => allScores.push({ tag, label, value: values[i], group }));
+      const ranked = tags.map(([, label], i) => ({ label, value: values[i] })).sort((a, b) => b.value - a.value);
+      groupHtml.push(`<article class="mc-profile-group"><h3>${escapeHtml(group)}</h3>${profileRadarSvg(tags, values)}<div class="mc-profile-rank">${ranked.map(x => `<span>${escapeHtml(x.label)} <b>${Math.round(x.value / max * 100)}</b></span>`).join('')}</div></article>`);
+    }
+    const represented = allScores.filter(x => x.value > 0).sort((a, b) => b.value - a.value);
+    const strongest = represented.slice(0, 3).map(x => x.label).join(', ');
+    const lowest = represented.slice(-3).reverse().map(x => x.label).join(', ');
+    const scope = state.profileFromYear === 'all' && state.profileToYear === 'all' ? 'all time' : `${state.profileFromYear === 'all' ? 'start' : state.profileFromYear}–${state.profileToYear === 'all' ? 'now' : state.profileToYear}`;
+    body.innerHTML = groupHtml.length ? `
+      <div class="mc-profile-insight"><b>Strength signals:</b> ${escapeHtml(strongest)}. <b>Growth areas:</b> ${escapeHtml(lowest)}.<span>${rows.length} sends in ${escapeHtml(scope)} · ${taggedRoutes} with matching tags · grade weighting: 6A ≈ 1×, 7A ≈ 1.6×, 8A ≈ 2.2×.</span></div>
+      <div class="mc-profile-grid">${groupHtml.join('')}</div>` :
+      `<div class="mc-profile-empty">No feature tags were found for sends in this period yet. Refresh will fetch them from the relevant area routelists.</div>`;
+    controls.querySelector('[data-mc-profile-from]').addEventListener('change', e => {
+      state.profileFromYear = e.target.value;
+      if (state.profileToYear !== 'all' && state.profileFromYear !== 'all' && state.profileFromYear > state.profileToYear) state.profileToYear = state.profileFromYear;
+      renderProfile();
+    });
+    controls.querySelector('[data-mc-profile-to]').addEventListener('change', e => {
+      state.profileToYear = e.target.value;
+      if (state.profileFromYear !== 'all' && state.profileToYear !== 'all' && state.profileToYear < state.profileFromYear) state.profileFromYear = state.profileToYear;
+      renderProfile();
+    });
+    card.hidden = false;
   }
 
   function renderSummary() {
@@ -2380,6 +2509,7 @@
 
   function renderAll() {
     aggregate();
+    renderProfile();
     renderSummary();
     renderActivity();
     renderNext();
@@ -2531,6 +2661,7 @@
       return;
     }
     aggregate();
+    renderProfile();
     renderSummary();
     renderNext();
     renderCrags();
@@ -2539,6 +2670,7 @@
     updateCacheInfo();
 
     await fillMissingCragTotals();
+    await enrichDoneFeatures(!useCache);
     await enrichTodoStats(!useCache);
     if (gen !== renderGen) return;
     renderAll();
@@ -2575,9 +2707,10 @@
       // Caches only — the project board (priorities/tiers/notes) is personal
       // data and deliberately survives a cache clear.
       try {
-        await remove([ASCENTS_CACHE_KEY, CRAG_FETCH_CACHE_KEY, ROUTE_STATS_KEY, CRAG_TOTALS_KEY]);
+        await remove([ASCENTS_CACHE_KEY, CRAG_FETCH_CACHE_KEY, ROUTE_STATS_KEY, ROUTE_FEATURES_KEY, CRAG_TOTALS_KEY]);
         state.cragTotals = {};
         state.routeStats = {};
+        state.routeFeatures = {};
         state.enrichTried.clear();
         setStatus('Cache cleared. Hit Refresh to re-fetch.', false);
         updateCacheInfo();
