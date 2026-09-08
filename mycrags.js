@@ -191,11 +191,12 @@
 
   // Parse an ascents-page document (or one page of it) into [{key, cragId, cragName, routeName, gradeInt, gradeLabel, genre, date}].
   // We keep every row (don't dedupe) so callers can pick the earliest date
-  // for "first at grade" calculations. The same row container is only walked
-  // once even if it carries multiple anchors pointing at the same route.
+  // for "first at grade" calculations. Some ascent views group several routes
+  // in a single activity container, so dedupe duplicate anchors per *route*,
+  // rather than skipping the entire container after its first route.
   function parseAscentRows(doc) {
     const rows = [];
-    const handledRows = new WeakSet();
+    const handledRoutesByRow = new WeakMap();
     for (const a of doc.querySelectorAll('a[href*="/crags/"]')) {
       const href = a.getAttribute('href') || '';
       const m = href.match(/^(?:https?:\/\/[^/]+)?\/crags\/([^/?#]+)\/routes\/([^/?#]+)/);
@@ -204,8 +205,12 @@
       const routeId = decodeURIComponent(m[2]);
 
       const row = a.closest('tr, li, article, .feed-item, .ascent-row, .activity-item, .ascent') || a.parentElement;
-      if (!row || handledRows.has(row)) continue;
-      handledRows.add(row);
+      if (!row) continue;
+      const routeKey = `${cragId}/${routeId}`;
+      let handled = handledRoutesByRow.get(row);
+      if (!handled) { handled = new Set(); handledRoutesByRow.set(row, handled); }
+      if (handled.has(routeKey)) continue;
+      handled.add(routeKey);
 
       // crag name: bare /crags/X anchor in the same row
       let cragName = '';
@@ -219,12 +224,14 @@
       }
 
       // route name: the matched anchor is sometimes a thumbnail/icon link with
-      // no text — fall back to any route anchor in the row that actually has text.
+      // no text — fall back to a text anchor for this exact route (not another
+      // route that happens to live in the same grouped activity item).
       let routeName = (a.textContent || '').trim();
       if (!routeName) {
         for (const ra of row.querySelectorAll('a[href]')) {
           const rh = ra.getAttribute('href') || '';
-          if (/\/crags\/[^/?#]+\/routes\/[^/?#]+/.test(rh)) {
+          const rm = rh.match(/^(?:https?:\/\/[^/]+)?\/crags\/([^/?#]+)\/routes\/([^/?#]+)/);
+          if (rm && decodeURIComponent(rm[1]) === cragId && decodeURIComponent(rm[2]) === routeId) {
             const t = (ra.textContent || '').trim();
             if (t) { routeName = t; break; }
           }
@@ -236,7 +243,7 @@
       const date = findDateInRow(row);
 
       rows.push({
-        key: `${cragId}/${routeId}`,
+        key: routeKey,
         cragId,
         cragName,
         routeName,
