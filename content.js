@@ -112,14 +112,18 @@
       if (!id) continue;
       let entry = byCrag.get(id);
       if (!entry) {
-        entry = { name: r.crag_name || '', byGenre: {}, byGrade: {}, total: 0 };
+        entry = { name: r.crag_name || '', byGenre: {}, byGrade: {}, byGenreGrade: {}, total: 0 };
         byCrag.set(id, entry);
       }
       entry.total += 1;
       const genre = r.genre || 'Other';
       entry.byGenre[genre] = (entry.byGenre[genre] || 0) + 1;
       const gi = r.grade_int || 0;
-      if (gi) entry.byGrade[gi] = (entry.byGrade[gi] || 0) + 1;
+      if (gi) {
+        entry.byGrade[gi] = (entry.byGrade[gi] || 0) + 1;
+        const byGrade = entry.byGenreGrade[genre] || (entry.byGenreGrade[genre] = {});
+        byGrade[gi] = (byGrade[gi] || 0) + 1;
+      }
     }
     return byCrag;
   }

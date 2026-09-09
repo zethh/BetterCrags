@@ -350,6 +350,31 @@ a:hover { color: #8fc7ff; text-decoration: underline; }
   color: var(--text-muted);
 }
 
+/* Feature-aware todo suggestions */
+.mc-project-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(270px, 1fr));
+  gap: 10px;
+  padding: 14px 16px 16px;
+}
+.mc-project-item {
+  position: relative;
+  background: var(--bg-elev-2);
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  padding: 11px 12px;
+  min-height: 112px;
+}
+.mc-project-name { display: flex; align-items: baseline; gap: 7px; padding-right: 58px; font-weight: 600; }
+.mc-project-name a { color: var(--text-strong); }
+.mc-project-grade { color: #8fc7ff; font-variant-numeric: tabular-nums; font-size: 12px; }
+.mc-project-crag, .mc-project-why { color: var(--text-muted); font-size: 11px; margin-top: 2px; }
+.mc-project-pills { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 7px; }
+.mc-project-pills span { background: var(--bg-elev-3); border-radius: 8px; padding: 1px 6px; color: var(--text); font-size: 10px; }
+.mc-project-pills span.is-new { color: #8fc7ff; background: rgba(44, 125, 217, .16); }
+.mc-project-pills span.is-todo { color: var(--good); background: rgba(92, 184, 116, .14); }
+.mc-project-score { position: absolute; top: 10px; right: 10px; color: var(--good); font-size: 11px; font-weight: 700; }
+
 /* ── Tabs ──────────────────────────────────────────────────────────── */
 .mc-tabs {
   display: flex; gap: 4px;
@@ -832,6 +857,27 @@ a:hover { color: #8fc7ff; text-decoration: underline; }
 .mc-month-detail li .r { color: var(--text); }
 .mc-month-detail li .r a.crag { color: var(--text-muted); }
 .mc-month-detail .mc-chip-row { margin: 0 0 12px; }
+
+/* ── Progression timeline ─────────────────────────────────────────── */
+.mc-progression {
+  margin-top: 12px;
+  padding: 10px 12px;
+  background: var(--bg-elev-2);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+}
+.mc-progression h4 { margin: 0 0 8px; color: var(--text-muted); font-size: 11px; text-transform: uppercase; letter-spacing: .06em; }
+.mc-progression-genre { display: grid; grid-template-columns: 72px minmax(0, 1fr); gap: 10px; padding: 6px 0; align-items: start; }
+.mc-progression-genre .g { color: var(--text-muted); font-size: 11px; line-height: 20px; text-transform: uppercase; letter-spacing: .05em; }
+.mc-progression-rows { display: grid; gap: 5px; min-width: 0; }
+.mc-progression-year { display: grid; grid-template-columns: 36px minmax(80px, 1fr) 38px; align-items: center; gap: 8px; min-height: 16px; font-size: 11px; color: var(--text-muted); }
+.mc-progression-year i { height: 8px; display: block; background: var(--bg-elev-3); border-radius: 4px; overflow: hidden; }
+.mc-progression-year i b { display: block; height: 100%; background: var(--accent); border-radius: inherit; }
+.mc-progression-year strong { color: var(--text-strong); font-weight: 600; }
+@media (max-width: 520px) {
+  .mc-progression-genre { grid-template-columns: 1fr; gap: 2px; }
+  .mc-progression-genre .g { line-height: normal; }
+}
 
 /* ── Crag spotlight ───────────────────────────────────────────────── */
 .mc-spotlight-body {

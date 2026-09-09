@@ -49,6 +49,16 @@
         <div class="mc-activity-body" id="mc-activity-body"></div>
       </section>
 
+      <section class="mc-card" id="mc-project-card" hidden>
+        <header class="mc-card-h">
+          <h2>Suggested projects</h2>
+          <div class="mc-card-sub">Unsent routes from your areas, ranked for your grade range, feature profile, quality, and community traffic.</div>
+          <div class="mc-genre-tabs" id="mc-project-genres"></div>
+          <div class="mc-area-tabs mc-project-areas" id="mc-project-areas"></div>
+        </header>
+        <div class="mc-project-list" id="mc-project-list"></div>
+      </section>
+
       <section class="mc-card" id="mc-next-card" hidden>
         <header class="mc-card-h">
           <h2>Where to go next</h2>
@@ -68,6 +78,7 @@
             <label class="mc-check"><input type="checkbox" id="mc-hide-zero-done" checked /> Hide untouched crags (no sends & no todos)</label>
             <label class="mc-check"><input type="checkbox" id="mc-only-todo" /> Only crags with todos</label>
             <label class="mc-check"><input type="checkbox" id="mc-known-totals" /> Hide crags with unknown totals</label>
+            <label class="mc-check">Completion range <select id="mc-completion-range"><option value="all">All grades</option></select></label>
           </div>
         </header>
         <div class="mc-genre-tabs" id="mc-crags-tabs"></div>

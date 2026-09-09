@@ -9,7 +9,7 @@
   const ASCENTS_CACHE_KEY = 'bc_mycrags_ascents_v1';
   const CRAG_FETCH_CACHE_KEY = 'bc_mycrags_crag_fetched_v4'; // v4: capture area param_id for routelist fetches
   const ROUTE_STATS_KEY = 'bc_route_stats_v1';  // routeKey → { rating, ascents, gradeInt, genre }
-  const ROUTE_FEATURES_KEY = 'bc_route_features_v1'; // routeKey → { crimpers, jugs, ... }
+  const ROUTE_FEATURES_KEY = 'bc_route_features_v2'; // routeKey → { crimpers, jugs, ... }
   const BOARD_KEY = 'bc_project_board_v2';       // tier-list board: named lists + global notes
   const BOARD_KEY_V1 = 'bc_project_board_v1';    // legacy single-list board (migrated on load)
   const CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 1 day for ascents (cheap to refetch)
@@ -353,15 +353,20 @@
           if (store && Array.isArray(store.routes)) {
             const byGenre = {};
             const byGrade = {};
+            const byGenreGrade = {};
             let name = '';
             for (const r of store.routes) {
               const g = r.genre || 'Other';
               byGenre[g] = (byGenre[g] || 0) + 1;
               const gi = r.grade_int || 0;
-              if (gi) byGrade[gi] = (byGrade[gi] || 0) + 1;
+              if (gi) {
+                byGrade[gi] = (byGrade[gi] || 0) + 1;
+                const genreGrade = byGenreGrade[g] || (byGenreGrade[g] = {});
+                genreGrade[gi] = (genreGrade[gi] || 0) + 1;
+              }
               if (!name) name = r.crag_name || '';
             }
-            return { name, total: store.routes.length, byGenre, byGrade, ...loc };
+            return { name, total: store.routes.length, byGenre, byGrade, byGenreGrade, ...loc };
           }
         } catch {}
       }
@@ -442,31 +447,37 @@
     state.routeStats = cache.stats;
   }
 
-  // Fetch feature tags only for routes the user has sent. We cache an area's
-  // lookup time separately so this remains inexpensive on subsequent opens.
+  // Fetch feature tags for both sends and todos. The area response also gives
+  // Suggested Projects a full discovery pool, not just routes already on todo.
   function enrichDoneFeatures(force) {
     return serialized(() => enrichDoneFeaturesNow(force));
   }
   async function enrichDoneFeaturesNow(force) {
-    const doneKeys = new Set(state.done.map(r => r.key));
-    if (!doneKeys.size) { state.routeFeatures = {}; return; }
+    const routeRows = [...state.done, ...state.todo];
+    const wantedKeys = new Set(routeRows.map(r => r.key));
+    if (!wantedKeys.size) { state.routeFeatures = {}; return; }
     const cache = (await get(ROUTE_FEATURES_KEY)) || { features: {}, areas: {} };
     cache.features = cache.features || {}; cache.areas = cache.areas || {};
     const now = Date.now();
     const areaIds = new Set();
-    for (const r of state.done) {
+    for (const r of routeRows) {
       const total = state.cragTotals[r.cragId];
       if (total && total.areaParamId) areaIds.add(total.areaParamId);
     }
-    const stale = [...areaIds].filter(id => force || !cache.areas[id] || (now - cache.areas[id]) > ROUTE_STATS_TTL_MS);
+    const stale = [...areaIds].filter(id => force || !state.areaRoutes[id] || !cache.areas[id] || (now - cache.areas[id]) > ROUTE_STATS_TTL_MS ||
+      routeRows.some(r => {
+        const total = state.cragTotals[r.cragId];
+        return total && total.areaParamId === id && !Object.prototype.hasOwnProperty.call(cache.features, r.key);
+      }));
     if (stale.length) {
       let completed = 0;
       setStatus(`Reading climb features (0/${stale.length} areas)…`, true);
       for (const areaId of stale) {
         const routes = await fetchAreaRoutes(areaId);
+        state.areaRoutes[areaId] = routes;
         for (const route of routes) {
           const key = `${route.crag_param_id || ''}/${route.param_id || ''}`;
-          if (!doneKeys.has(key)) continue;
+          if (!wantedKeys.has(key)) continue;
           const features = {};
           for (const tag of FEATURE_KEYS) if (route[tag]) features[tag] = true;
           cache.features[key] = features;
@@ -650,6 +661,8 @@
     cragsAggregated: new Map(), // cragId → aggregated stats
     activeGenreNext: 'all',
     activeAreaNext: 'all',
+    activeAreaProjects: 'all',
+    activeGenreProjects: 'all',
     activeGenreCrags: 'all',
     cragSort: { col: 'todo', dir: 'desc' },
     activeYear: null,     // 'all' or 'YYYY'
@@ -658,9 +671,11 @@
     activeGenreMonth: 'all', // 'all' | 'Boulder' | 'Sport' | 'Other'
     profileFromYear: 'all',
     profileToYear: 'all',
+    completionGradeMax: 'all',
     selectedCragId: null, // crag spotlight
     routeStats: {},       // routeKey → { rating, ascents, gradeInt, genre }
     routeFeatures: {},    // routeKey → { crimpers: true, ... }
+    areaRoutes: {},       // area id → full RouteList routes (session-only discovery pool)
     enrichTried: new Set(), // route keys we've already tried to enrich this session
     board: null,          // tier-list board (loaded from storage)
   };
@@ -713,6 +728,7 @@
           country: '',
           totalsByGenre: {},
           totalsByGrade: {},
+          totalsByGenreGrade: {},
           firsts: {}, // `${genre}:${gi}` → { date, routeName } for the earliest send of that grade
         });
       }
@@ -733,6 +749,7 @@
       if (totals && totals.total != null) c.total = totals.total;
       if (totals && totals.byGenre) c.totalsByGenre = totals.byGenre;
       if (totals && totals.byGrade) c.totalsByGrade = totals.byGrade;
+      if (totals && totals.byGenreGrade) c.totalsByGenreGrade = totals.byGenreGrade;
       if (totals && totals.name && !c.name) c.name = totals.name;
       if (totals && totals.area) c.area = totals.area;
       if (totals && totals.country) c.country = totals.country;
@@ -1054,6 +1071,154 @@
           <div class="score">priority ${score.toFixed(1)}</div>
         </div>
       `;
+    }).join('');
+    card.hidden = false;
+  }
+
+  // ── Render: feature-aware project suggestions ────────────────────
+  function featureAffinity() {
+    const totals = {}, maxima = {};
+    for (const [, tags] of FEATURE_GROUPS) {
+      let max = 0;
+      for (const [tag] of tags) {
+        const score = state.done.reduce((sum, r) => (state.routeFeatures[r.key] || {})[tag]
+          ? sum + profileGradeWeight(r.gradeInt) : sum, 0);
+        totals[tag] = score;
+        max = Math.max(max, score);
+      }
+      for (const [tag] of tags) maxima[tag] = max;
+    }
+    return { totals, maxima };
+  }
+
+  function renderProjectSuggestions() {
+    const card = $('#mc-project-card');
+    const list = $('#mc-project-list');
+    const genreControls = $('#mc-project-genres');
+    const areaControls = $('#mc-project-areas');
+    if (!state.done.length) { card.hidden = true; return; }
+    const affinity = featureAffinity();
+    // One standout send proves the grade is a realistic project, but doesn't
+    // yet promote the next half-grade to the user's default target. After
+    // three sends at a level, gently advance the target by one half-grade.
+    const PROJECT_GRADE_PROMOTION_SENDS = 3;
+    const gradeTargetByGenre = new Map();
+    for (const genre of new Set(state.done.map(r => r.genre || 'Other'))) {
+      const grades = new Map();
+      for (const r of state.done) {
+        if ((r.genre || 'Other') !== genre || !r.gradeInt) continue;
+        grades.set(r.gradeInt, (grades.get(r.gradeInt) || 0) + 1);
+      }
+      const highest = Math.max(0, ...grades.keys());
+      if (highest) gradeTargetByGenre.set(genre, highest + ((grades.get(highest) || 0) >= PROJECT_GRADE_PROMOTION_SENDS ? 50 : 0));
+    }
+    const targetText = [...gradeTargetByGenre.entries()]
+      .map(([genre, grade]) => `${genre} through ${intToLabel(grade, genre)}`).join(' · ');
+    const sub = card.querySelector('.mc-card-sub');
+    if (sub && targetText) sub.textContent = `Full grade match: ${targetText}. A level advances after ${PROJECT_GRADE_PROMOTION_SENDS} sends at your current top grade.`;
+    const doneKeys = new Set(state.done.map(r => r.key));
+    const todoKeys = new Set(state.todo.map(r => r.key));
+    const areaLabelById = new Map();
+    for (const total of Object.values(state.cragTotals)) {
+      if (total && total.areaParamId) areaLabelById.set(total.areaParamId, total.area || 'Unknown');
+    }
+    const candidates = [];
+    for (const [areaId, routes] of Object.entries(state.areaRoutes)) {
+      for (const raw of routes) {
+        const key = `${raw.crag_param_id || ''}/${raw.param_id || ''}`;
+        if (!key || doneKeys.has(key)) continue;
+        candidates.push({
+          key, cragId: raw.crag_param_id || '', cragName: raw.crag_name || '',
+          routeName: raw.name || '', gradeInt: raw.grade_int || 0,
+          gradeLabel: intToLabel(raw.grade_int || 0, raw.genre || ''), genre: raw.genre || '',
+          areaId, area: areaLabelById.get(areaId) || 'Unknown', raw,
+          isTodo: todoKeys.has(key),
+        });
+      }
+    }
+    const areas = new Map();
+    const genres = [...new Set(candidates.map(route => route.genre).filter(Boolean))].sort();
+    if (state.activeGenreProjects !== 'all' && !genres.includes(state.activeGenreProjects)) state.activeGenreProjects = 'all';
+    genreControls.innerHTML = '';
+    for (const genre of ['all', ...genres]) {
+      const btn = document.createElement('button');
+      btn.textContent = genre === 'all' ? 'All' : genre;
+      if (genre === state.activeGenreProjects) btn.dataset.active = '1';
+      btn.addEventListener('click', () => { state.activeGenreProjects = genre; renderProjectSuggestions(); });
+      genreControls.appendChild(btn);
+    }
+    // Only offer areas that have routes in the selected climbing type.
+    areas.clear();
+    for (const route of candidates) {
+      if (state.activeGenreProjects !== 'all' && route.genre !== state.activeGenreProjects) continue;
+      const entry = areas.get(route.areaId) || { label: route.area, count: 0 };
+      entry.count++;
+      areas.set(route.areaId, entry);
+    }
+    if (state.activeAreaProjects !== 'all' && !areas.has(state.activeAreaProjects)) state.activeAreaProjects = 'all';
+    areaControls.innerHTML = '';
+    if (areas.size > 1) {
+      const add = (key, label) => {
+        const btn = document.createElement('button');
+        btn.textContent = label;
+        if (key === state.activeAreaProjects) btn.dataset.active = '1';
+        btn.addEventListener('click', () => { state.activeAreaProjects = key; renderProjectSuggestions(); });
+        areaControls.appendChild(btn);
+      };
+      add('all', 'All areas');
+      [...areas.entries()].sort((a, b) => b[1].count - a[1].count || a[1].label.localeCompare(b[1].label))
+        .forEach(([key, entry]) => add(key, `${entry.label} (${entry.count})`));
+    }
+    const routesInArea = candidates.filter(route => {
+      if (state.activeGenreProjects !== 'all' && route.genre !== state.activeGenreProjects) return false;
+      return state.activeAreaProjects === 'all' || route.areaId === state.activeAreaProjects;
+    });
+    const suggestions = routesInArea.map(route => {
+      const target = gradeTargetByGenre.get(route.genre || 'Other') || route.gradeInt;
+      // Centre fit on the current target rather than treating all lower grades
+      // as equal. A 7B target means 7A+ is still an excellent 97% option,
+      // while 6C+ (91%) is mileage rather than the first project suggestion.
+      // Above target, use a slightly steeper five points per half-grade:
+      // 7B → 7B+ = 95%, 7C = 90%.
+      const gradeFit = route.gradeInt
+        ? (route.gradeInt <= target
+          ? Math.max(0.3, 1 - (target - route.gradeInt) * 0.0006)
+          : Math.max(0.15, 1 - (route.gradeInt - target) / 1000))
+        : .5;
+      const tags = FEATURE_KEYS.filter(tag => route.raw[tag]);
+      const featureFit = tags.length
+        ? tags.reduce((sum, tag) => sum + ((affinity.totals[tag] || 0) / Math.max(1, affinity.maxima[tag] || 0)), 0) / tags.length
+        : .45; // unknown tags are neutral rather than silently penalised
+      const stats = { rating: Number(route.raw.rating) || 0, ascents: Number(route.raw.ascents_done_count) || 0 };
+      // Ratings need evidence. Blend the displayed rating with a neutral 1.5★
+      // prior; its influence fades over roughly 25 ascents. Thus a lone 3★
+      // vote is promising but not equivalent to a 3★ consensus from 150 sends.
+      const ratingConfidence = 1 - Math.exp(-stats.ascents / 25);
+      const adjustedRating = stats.rating
+        ? stats.rating * ratingConfidence + 1.5 * (1 - ratingConfidence)
+        : 1.5;
+      const quality = Math.min(1, adjustedRating / 3);
+      const traffic = Math.min(1, Math.log1p(stats.ascents) / Math.log(101));
+      const score = gradeFit * .45 + featureFit * .3 + quality * .18 + traffic * .07;
+      return { route, tags, score, gradeFit, featureFit, stats, adjustedRating };
+    }).sort((a, b) => b.score - a.score).slice(0, 6);
+    if (!suggestions.length) { card.hidden = true; return; }
+    list.innerHTML = suggestions.map(({ route, tags, score, gradeFit, featureFit, stats, adjustedRating }) => {
+      const href = `https://thetopo.com/crags/${encodeURIComponent(route.cragId)}/routes/${encodeURIComponent(route.key.split('/')[1] || '')}`;
+      const tagLabels = tags.slice(0, 4).map(tag => {
+        for (const [, group] of FEATURE_GROUPS) {
+          const found = group.find(([key]) => key === tag);
+          if (found) return found[1];
+        }
+        return tag;
+      });
+      return `<article class="mc-project-item">
+        <div class="mc-project-name"><span class="mc-project-grade">${escapeHtml(route.gradeLabel || intToLabel(route.gradeInt, route.genre))}</span><a href="${href}" target="_blank" rel="noopener">${escapeHtml(route.routeName || 'Unnamed route')}</a></div>
+        <div class="mc-project-crag">${escapeHtml(route.cragName || route.cragId)}${route.area ? ` · ${escapeHtml(route.area)}` : ''}</div>
+        <div class="mc-project-pills"><span class="${route.isTodo ? 'is-todo' : 'is-new'}">${route.isTodo ? 'On todo' : 'New suggestion'}</span>${tagLabels.map(label => `<span>${escapeHtml(label)}</span>`).join('') || '<span>Untagged</span>'}</div>
+        <div class="mc-project-why">${Math.round(gradeFit * 100)}% grade fit · ${Math.round(featureFit * 100)}% style fit · ${stats.rating ? `${adjustedRating.toFixed(1)}★ confidence` : 'unrated'} · ${stats.ascents} ascents</div>
+        <div class="mc-project-score">${Math.round(score * 100)} match</div>
+      </article>`;
     }).join('');
     card.hidden = false;
   }
@@ -1980,11 +2145,34 @@
     const hideZeroDone = $('#mc-hide-zero-done').checked;
     const onlyTodo = $('#mc-only-todo').checked;
     const knownOnly = $('#mc-known-totals').checked;
+    const rangeSelect = $('#mc-completion-range');
+    const rangeTable = genre === 'Boulder' ? FONT_GRADES : FRENCH_GRADES;
+    // Completion can be scoped to a grade ceiling: useful for separating a
+    // finished warm-up/mileage band from aspirational high-grade routes.
+    if (rangeSelect.options.length !== rangeTable.length + 1 || rangeSelect.dataset.genre !== genre) {
+      rangeSelect.dataset.genre = genre;
+      rangeSelect.innerHTML = `<option value="all">All grades</option>${rangeTable.map(([gi, label]) => `<option value="${gi}">Up to ${escapeHtml(label)}</option>`).join('')}`;
+    }
+    rangeSelect.value = state.completionGradeMax;
+    if (rangeSelect.value !== state.completionGradeMax) state.completionGradeMax = 'all';
+    const gradeMax = state.completionGradeMax === 'all' ? null : Number(state.completionGradeMax);
 
     const rows = [];
     for (const c of state.cragsAggregated.values()) {
       if (!rowMatchesGenre(c, genre)) continue;
       const t = cragGenreTotals(c, genre);
+      if (gradeMax) {
+        const scopeRows = (rows) => rows.filter(r => (genre === 'all' || r.genre === genre) && r.gradeInt && r.gradeInt <= gradeMax);
+        const doneRows = scopeRows(c.done);
+        const todoRows = scopeRows(c.todo);
+        t.done = doneRows.length;
+        t.todo = todoRows.length;
+        const gradeHistogram = genre === 'all'
+          ? c.totalsByGrade
+          : (c.totalsByGenreGrade || {})[genre] || c.totalsByGrade;
+        t.total = Object.entries(gradeHistogram || {}).reduce((sum, [gi, count]) => +gi <= gradeMax ? sum + count : sum, 0) || null;
+        t.hardestByGenre = hardestByGenre(doneRows);
+      }
       if (hideZeroDone && t.done === 0 && t.todo === 0) continue;
       if (onlyTodo && t.todo === 0) continue;
       if (knownOnly && (t.total == null || t.total <= 0)) continue;
@@ -2371,6 +2559,19 @@
       `;
     }
 
+    // A compact grade timeline complements the monthly volume chart: it makes
+    // sustained progression visible even when one exceptional send dominates a
+    // year's headline hardest grade.
+    const progressionGenres = sortedGenres(new Map([...hardestByGenre(state.done)].map(([g]) => [g, true])));
+    const progressionHtml = progressionGenres.length ? `<div class="mc-progression"><h4>Progression timeline</h4>${progressionGenres.map(genre => {
+      const entries = years.map(year => ({ year, peak: hardestByGenre(state.done.filter(r => r.genre === genre && r.date && r.date.startsWith(year + '-'))).get(genre) })).filter(x => x.peak);
+      if (!entries.length) return '';
+      return `<div class="mc-progression-genre"><span class="g">${escapeHtml(genre)}</span><div class="mc-progression-rows">${entries.map(({ year, peak }) => {
+        const width = Math.max(8, Math.min(100, ((peak.gi - 100) / 1400) * 100));
+        return `<div class="mc-progression-year" title="${escapeHtml(year)}: ${escapeHtml(peak.label)}"><span>${escapeHtml(year)}</span><i><b style="width:${width.toFixed(1)}%"></b></i><strong>${escapeHtml(peak.label)}</strong></div>`;
+      }).join('')}</div></div>`;
+    }).join('')}</div>` : '';
+
     body.innerHTML = `
       ${bodyHtml}
       ${tiles.length ? `<div class="mc-activity-summary">${tiles.map(t => `
@@ -2380,6 +2581,7 @@
           ${t.h ? `<div class="h">${escapeHtml(t.h)}</div>` : ''}
         </div>
       `).join('')}</div>` : ''}
+      ${progressionHtml}
       ${detailHtml}
     `;
 
@@ -2519,6 +2721,7 @@
     renderProfile();
     renderSummary();
     renderActivity();
+    renderProjectSuggestions();
     renderNext();
     renderBoard();
     renderCrags();
@@ -2639,6 +2842,7 @@
     await set(ASCENTS_CACHE_KEY, { user, t: cached.t || Date.now(), done: state.done, todo });
     aggregate();
     await fillMissingCragTotals();
+    await enrichDoneFeatures(false);
     await enrichTodoStats(false);
     if (gen !== renderGen) return;
     // Don't yank the UI out from under an active edit/drag/search.
@@ -2671,6 +2875,7 @@
     renderProfile();
     renderSummary();
     renderNext();
+    renderProjectSuggestions();
     renderCrags();
     renderFirsts();
     renderStats();
@@ -2718,6 +2923,7 @@
         state.cragTotals = {};
         state.routeStats = {};
         state.routeFeatures = {};
+        state.areaRoutes = {};
         state.enrichTried.clear();
         setStatus('Cache cleared. Hit Refresh to re-fetch.', false);
         updateCacheInfo();
@@ -2752,6 +2958,10 @@
     $('#mc-hide-zero-done').addEventListener('change', () => renderCrags());
     $('#mc-only-todo').addEventListener('change', () => renderCrags());
     $('#mc-known-totals').addEventListener('change', () => renderCrags());
+    $('#mc-completion-range').addEventListener('change', (e) => {
+      state.completionGradeMax = e.target.value;
+      renderCrags();
+    });
     document.querySelectorAll('#mc-crags-table th[data-sort]').forEach(th => {
       th.addEventListener('click', () => {
         const col = th.getAttribute('data-sort');
