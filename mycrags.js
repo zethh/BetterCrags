@@ -10,6 +10,7 @@
   const CRAG_FETCH_CACHE_KEY = 'bc_mycrags_crag_fetched_v4'; // v4: capture area param_id for routelist fetches
   const ROUTE_STATS_KEY = 'bc_route_stats_v1';  // routeKey → { rating, ascents, gradeInt, genre }
   const ROUTE_FEATURES_KEY = 'bc_route_features_v2'; // routeKey → { crimpers, jugs, ... }
+  const PROJECT_SUGGESTIONS_KEY = 'bc_project_suggestions_v1'; // user → hidden route keys
   const BOARD_KEY = 'bc_project_board_v2';       // tier-list board: named lists + global notes
   const BOARD_KEY_V1 = 'bc_project_board_v1';    // legacy single-list board (migrated on load)
   const CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 1 day for ascents (cheap to refetch)
@@ -144,6 +145,18 @@
       }
       catch { resolve(); }
     });
+  }
+
+  async function loadDismissedProjects(user) {
+    const stored = (await get(PROJECT_SUGGESTIONS_KEY)) || {};
+    state.dismissedProjectsByUser = stored;
+    state.dismissedProjectKeys = new Set(Array.isArray(stored[user]) ? stored[user] : []);
+  }
+
+  function saveDismissedProjects() {
+    if (!state.user) return;
+    state.dismissedProjectsByUser[state.user] = [...state.dismissedProjectKeys];
+    return set(PROJECT_SUGGESTIONS_KEY, state.dismissedProjectsByUser);
   }
 
   // Serialize read-modify-write merges of shared cache keys (route stats,
@@ -663,6 +676,8 @@
     activeAreaNext: 'all',
     activeAreaProjects: 'all',
     activeGenreProjects: 'all',
+    dismissedProjectKeys: new Set(),
+    dismissedProjectsByUser: {},
     activeGenreCrags: 'all',
     cragSort: { col: 'todo', dir: 'desc' },
     activeYear: null,     // 'all' or 'YYYY'
@@ -1096,6 +1111,7 @@
     const list = $('#mc-project-list');
     const genreControls = $('#mc-project-genres');
     const areaControls = $('#mc-project-areas');
+    const projectControls = $('#mc-project-controls');
     if (!state.done.length) { card.hidden = true; return; }
     const affinity = featureAffinity();
     // One standout send proves the grade is a realistic project, but doesn't
@@ -1126,7 +1142,7 @@
     for (const [areaId, routes] of Object.entries(state.areaRoutes)) {
       for (const raw of routes) {
         const key = `${raw.crag_param_id || ''}/${raw.param_id || ''}`;
-        if (!key || doneKeys.has(key)) continue;
+        if (!key || doneKeys.has(key) || state.dismissedProjectKeys.has(key)) continue;
         candidates.push({
           key, cragId: raw.crag_param_id || '', cragName: raw.crag_name || '',
           routeName: raw.name || '', gradeInt: raw.grade_int || 0,
@@ -1202,7 +1218,19 @@
       const score = gradeFit * .45 + featureFit * .3 + quality * .18 + traffic * .07;
       return { route, tags, score, gradeFit, featureFit, stats, adjustedRating };
     }).sort((a, b) => b.score - a.score).slice(0, 6);
-    if (!suggestions.length) { card.hidden = true; return; }
+    if (!suggestions.length) {
+      list.innerHTML = '<div class="mc-project-empty">No unsent routes match these filters.</div>';
+      projectControls.innerHTML = state.dismissedProjectKeys.size
+        ? `<button type="button" data-mc-project-restore>Restore ${state.dismissedProjectKeys.size} hidden suggestion${state.dismissedProjectKeys.size === 1 ? '' : 's'}</button>`
+        : '';
+      projectControls.querySelector('[data-mc-project-restore]')?.addEventListener('click', () => {
+        state.dismissedProjectKeys.clear();
+        saveDismissedProjects();
+        renderProjectSuggestions();
+      });
+      card.hidden = false;
+      return;
+    }
     list.innerHTML = suggestions.map(({ route, tags, score, gradeFit, featureFit, stats, adjustedRating }) => {
       const href = `https://thetopo.com/crags/${encodeURIComponent(route.cragId)}/routes/${encodeURIComponent(route.key.split('/')[1] || '')}`;
       const tagLabels = tags.slice(0, 4).map(tag => {
@@ -1218,8 +1246,22 @@
         <div class="mc-project-pills"><span class="${route.isTodo ? 'is-todo' : 'is-new'}">${route.isTodo ? 'On todo' : 'New suggestion'}</span>${tagLabels.map(label => `<span>${escapeHtml(label)}</span>`).join('') || '<span>Untagged</span>'}</div>
         <div class="mc-project-why">${Math.round(gradeFit * 100)}% grade fit · ${Math.round(featureFit * 100)}% style fit · ${stats.rating ? `${adjustedRating.toFixed(1)}★ confidence` : 'unrated'} · ${stats.ascents} ascents</div>
         <div class="mc-project-score">${Math.round(score * 100)} match</div>
+        <button type="button" class="mc-project-hide" data-mc-project-hide="${escapeHtml(route.key)}" title="Remove this route from suggestions">Hide</button>
       </article>`;
     }).join('');
+    projectControls.innerHTML = state.dismissedProjectKeys.size
+      ? `<button type="button" data-mc-project-restore>Restore ${state.dismissedProjectKeys.size} hidden suggestion${state.dismissedProjectKeys.size === 1 ? '' : 's'}</button>`
+      : '';
+    list.querySelectorAll('[data-mc-project-hide]').forEach(btn => btn.addEventListener('click', () => {
+      state.dismissedProjectKeys.add(btn.getAttribute('data-mc-project-hide'));
+      saveDismissedProjects();
+      renderProjectSuggestions();
+    }));
+    projectControls.querySelector('[data-mc-project-restore]')?.addEventListener('click', () => {
+      state.dismissedProjectKeys.clear();
+      saveDismissedProjects();
+      renderProjectSuggestions();
+    });
     card.hidden = false;
   }
 
@@ -2856,6 +2898,7 @@
     state.user = user;
     state.cragTotals = (await get(CRAG_TOTALS_KEY)) || {};
     await loadBoard();
+    await loadDismissedProjects(user);
     if (gen !== renderGen) return;
     let servedFromCache = false;
     try {

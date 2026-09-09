@@ -357,6 +357,7 @@ a:hover { color: #8fc7ff; text-decoration: underline; }
   gap: 10px;
   padding: 14px 16px 16px;
 }
+.mc-project-empty { color: var(--text-muted); font-size: 13px; }
 .mc-project-item {
   position: relative;
   background: var(--bg-elev-2);
@@ -374,6 +375,21 @@ a:hover { color: #8fc7ff; text-decoration: underline; }
 .mc-project-pills span.is-new { color: #8fc7ff; background: rgba(44, 125, 217, .16); }
 .mc-project-pills span.is-todo { color: var(--good); background: rgba(92, 184, 116, .14); }
 .mc-project-score { position: absolute; top: 10px; right: 10px; color: var(--good); font-size: 11px; font-weight: 700; }
+.mc-project-hide {
+  position: absolute; right: 10px; bottom: 8px;
+  background: transparent; color: var(--text-muted);
+  border: 1px solid var(--border-strong); border-radius: 5px;
+  padding: 2px 7px; font: inherit; font-size: 10px; cursor: pointer;
+}
+.mc-project-hide:hover { color: #f08a8a; border-color: #a85a5a; }
+.mc-project-controls { margin-top: 8px; }
+.mc-project-controls:empty { display: none; }
+.mc-project-controls button {
+  background: transparent; color: var(--text-muted);
+  border: 1px solid var(--border-strong); border-radius: 5px;
+  padding: 3px 8px; font: inherit; font-size: 11px; cursor: pointer;
+}
+.mc-project-controls button:hover { color: var(--text); background: var(--bg-elev-2); }
 
 /* ── Tabs ──────────────────────────────────────────────────────────── */
 .mc-tabs {
