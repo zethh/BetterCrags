@@ -4,83 +4,29 @@
 (() => {
   'use strict';
 
-  const USERNAME_KEY = 'bc_username_v1';
-  const CRAG_TOTALS_KEY = 'bc_crag_totals_v1';
-  const ASCENTS_CACHE_KEY = 'bc_mycrags_ascents_v1';
-  const CRAG_FETCH_CACHE_KEY = 'bc_mycrags_crag_fetched_v4'; // v4: capture area param_id for routelist fetches
-  const ROUTE_STATS_KEY = 'bc_route_stats_v1';  // routeKey → { rating, ascents, gradeInt, genre }
-  const ROUTE_FEATURES_KEY = 'bc_route_features_v2'; // routeKey → { crimpers, jugs, ... }
-  const PROJECT_SUGGESTIONS_KEY = 'bc_project_suggestions_v1'; // user → hidden route keys
-  const BOARD_KEY = 'bc_project_board_v2';       // tier-list board: named lists + global notes
-  const BOARD_KEY_V1 = 'bc_project_board_v1';    // legacy single-list board (migrated on load)
+  // Grade tables, feature tags, storage wrappers + list shapes live in
+  // shared.js (loaded by mycrags.html first).
+  const {
+    FONT_GRADES, FRENCH_GRADES, escapeHtml,
+    FEATURE_GROUPS, FEATURE_KEYS, STORAGE_KEYS, CACHE_KEYS,
+    storageGet, storageSet, storageRemove, storageBytesInUse, onStorageError, formatBytes,
+    gradeLabelExact, parseGradeToken, findGradeInText,
+    routeKeyOf, readRouteListStore, maxPageInPager, looksLikeLoginPage,
+    TIERS, bcGenId, makeList, makeCustomList, sanitizeList,
+  } = window.BCShared;
+
+  const USERNAME_KEY = STORAGE_KEYS.USERNAME;
+  const CRAG_TOTALS_KEY = STORAGE_KEYS.CRAG_TOTALS;
+  const ASCENTS_CACHE_KEY = STORAGE_KEYS.ASCENTS_CACHE;
+  const CRAG_FETCH_CACHE_KEY = STORAGE_KEYS.CRAG_FETCHED;
+  const ROUTE_STATS_KEY = STORAGE_KEYS.ROUTE_STATS;
+  const ROUTE_FEATURES_KEY = STORAGE_KEYS.ROUTE_FEATURES;
+  const PROJECT_SUGGESTIONS_KEY = STORAGE_KEYS.PROJECT_SUGGESTIONS;
+  const BOARD_KEY = STORAGE_KEYS.BOARD;
+  const BOARD_KEY_V1 = STORAGE_KEYS.BOARD_V1;
   const CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 1 day for ascents (cheap to refetch)
   const CRAG_PAGE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
   const ROUTE_STATS_TTL_MS = 7 * 24 * 60 * 60 * 1000;
-
-  // Kept in sync with the feature filters on the routelist. These booleans are
-  // available in the area RouteList store, but not in ascent-list rows.
-  const FEATURE_GROUPS = [
-    ['Hold type', [['crimpers', 'Crimps'], ['slopers', 'Slopers'], ['jugs', 'Jugs'], ['pockets', 'Pockets'], ['tufas', 'Tufas'], ['crack', 'Crack']]],
-    ['Wall angle', [['roof', 'Roof'], ['overhang', 'Overhang'], ['vertical', 'Vertical'], ['slab', 'Slab']]],
-    ['Style', [['fingery', 'Fingery'], ['powerful', 'Powerful'], ['dyno', 'Dyno'], ['endurance', 'Endurance'], ['technical', 'Technical'], ['mental', 'Mental'], ['traverse', 'Traverse']]],
-    ['Other', [['sitstart', 'Sit start'], ['topslasthold', 'Top/last hold'], ['tradgear_required', 'Trad gear'], ['dangerous', 'Dangerous']]],
-  ];
-  const FEATURE_KEYS = FEATURE_GROUPS.flatMap(([, tags]) => tags.map(([key]) => key));
-
-  // Grade tables + escapeHtml live in shared.js (loaded by mycrags.html first).
-  const { FONT_GRADES, FRENCH_GRADES, escapeHtml } = window.BCShared;
-  const FONT_LABEL_TO_INT = new Map(FONT_GRADES.map(([v, l]) => [l, v]));
-  const FRENCH_LABEL_TO_INT = new Map(FRENCH_GRADES.map(([v, l]) => [l, v]));
-  const FONT_INT_TO_LABEL = new Map(FONT_GRADES.map(([v, l]) => [v, l]));
-  const FRENCH_INT_TO_LABEL = new Map(FRENCH_GRADES.map(([v, l]) => [v, l]));
-
-  function intToLabel(gi, genre) {
-    const map = genre === 'Boulder' ? FONT_INT_TO_LABEL : FRENCH_INT_TO_LABEL;
-    return map.get(gi) || String(gi);
-  }
-
-  // Try Font first (uppercase indicates boulder); fall back to French.
-  // Returns { gi, genre, label } or null.
-  function parseGradeToken(token) {
-    if (!token) return null;
-    const t = token.trim().replace(/\s+/g, '');
-    // 7A, 7A+, 8B/8B+, 5, 5+ → Font (boulder)
-    const fontMatch = t.match(/^([3-9])([A-D])?(\+)?$/);
-    if (fontMatch && fontMatch[2]) {
-      const label = (fontMatch[1] + fontMatch[2] + (fontMatch[3] || '')).toUpperCase();
-      const gi = FONT_LABEL_TO_INT.get(label);
-      if (gi) return { gi, genre: 'Boulder', label };
-    }
-    const frenchMatch = t.match(/^([3-9])([a-c])(\+)?$/);
-    if (frenchMatch) {
-      const label = (frenchMatch[1] + frenchMatch[2] + (frenchMatch[3] || '')).toLowerCase();
-      const gi = FRENCH_LABEL_TO_INT.get(label);
-      if (gi) return { gi, genre: 'Sport', label };
-    }
-    // Bare-number grades like "5" or "4+" — assume Font but mark genre unknown.
-    const numMatch = t.match(/^([3-5])(\+)?$/);
-    if (numMatch) {
-      const label = numMatch[1] + (numMatch[2] || '');
-      const gi = FONT_LABEL_TO_INT.get(label) || FRENCH_LABEL_TO_INT.get(label);
-      if (gi) return { gi, genre: '', label };
-    }
-    return null;
-  }
-
-  // Grade tokens within longer text — extract the first reasonable token.
-  // NB: a trailing \b can never sit after a "+" (a "+" before whitespace/end has
-  // no word boundary), so \b would make the engine backtrack and silently drop the
-  // "+", folding every plus-grade into its base (7A+ → 7A). Use a no-alnum lookahead.
-  const GRADE_TOKEN_RE = /\b\d[A-Da-c]\+?(?![A-Za-z0-9])|\b\d\+?(?![A-Za-z0-9])/g;
-  function findGradeInText(text) {
-    if (!text) return null;
-    const candidates = text.match(GRADE_TOKEN_RE) || [];
-    for (const c of candidates) {
-      const parsed = parseGradeToken(c);
-      if (parsed) return parsed;
-    }
-    return null;
-  }
 
   function findDateInRow(row) {
     const timeEl = row.querySelector('time[datetime]');
@@ -104,51 +50,9 @@
     return null;
   }
 
-  // ── Storage helpers ───────────────────────────────────────────────
-  function get(key) {
-    return new Promise((resolve) => {
-      try {
-        chrome.storage.local.get(key, (o) => {
-          if (chrome.runtime.lastError) {
-            console.warn('BetterCrags: storage.get failed:', chrome.runtime.lastError.message);
-            resolve(null);
-            return;
-          }
-          resolve((o && o[key]) || null);
-        });
-      }
-      catch { resolve(null); }
-    });
-  }
-  function set(key, val) {
-    return new Promise((resolve) => {
-      try {
-        chrome.storage.local.set({ [key]: val }, () => {
-          if (chrome.runtime.lastError) {
-            console.warn('BetterCrags: storage.set failed:', chrome.runtime.lastError.message);
-          }
-          resolve();
-        });
-      }
-      catch { resolve(); }
-    });
-  }
-  function remove(keys) {
-    return new Promise((resolve) => {
-      try {
-        chrome.storage.local.remove(keys, () => {
-          if (chrome.runtime.lastError) {
-            console.warn('BetterCrags: storage.remove failed:', chrome.runtime.lastError.message);
-          }
-          resolve();
-        });
-      }
-      catch { resolve(); }
-    });
-  }
 
   async function loadDismissedProjects(user) {
-    const stored = (await get(PROJECT_SUGGESTIONS_KEY)) || {};
+    const stored = (await storageGet(PROJECT_SUGGESTIONS_KEY)) || {};
     state.dismissedProjectsByUser = stored;
     state.dismissedProjectKeys = new Set(Array.isArray(stored[user]) ? stored[user] : []);
   }
@@ -156,7 +60,7 @@
   function saveDismissedProjects() {
     if (!state.user) return;
     state.dismissedProjectsByUser[state.user] = [...state.dismissedProjectKeys];
-    return set(PROJECT_SUGGESTIONS_KEY, state.dismissedProjectsByUser);
+    return storageSet({ [PROJECT_SUGGESTIONS_KEY]: state.dismissedProjectsByUser });
   }
 
   // Serialize read-modify-write merges of shared cache keys (route stats,
@@ -184,23 +88,6 @@
     return new DOMParser().parseFromString(text, 'text/html');
   }
 
-  function maxPageInPager(doc) {
-    const pager = doc.querySelector('#table-pager, .pagination, nav[aria-label="Pager"]');
-    if (!pager) return 0;
-    let mx = 0;
-    for (const a of pager.querySelectorAll('a[data-page], a[href]')) {
-      const dp = a.getAttribute('data-page');
-      if (dp != null) {
-        const p = +dp;
-        if (!isNaN(p)) mx = Math.max(mx, p);
-        continue;
-      }
-      const href = a.getAttribute('href') || '';
-      const m = href.match(/[?&]page=(\d+)/);
-      if (m) mx = Math.max(mx, +m[1]);
-    }
-    return mx;
-  }
 
   // Parse an ascents-page document (or one page of it) into [{key, cragId, cragName, routeName, gradeInt, gradeLabel, genre, date}].
   // We keep every row (don't dedupe) so callers can pick the earliest date
@@ -308,6 +195,15 @@
     if (onProgress) onProgress(`Fetching ${kind} (page 1)…`);
     const doc0 = await fetchHtml(base);
     const rows = parseAscentRows(doc0);
+    if (!rows.length) {
+      // Distinguish "empty list" from "we didn't get the page we expected":
+      // thetopo serves the login form (same 200 status) when logged out, and
+      // an unrecognised page layout means the parser needs updating.
+      if (looksLikeLoginPage(doc0)) throw new Error('thetopo.com served the login page — log in there (in this browser), then hit Refresh');
+      if (!doc0.querySelector(`a[href*="/climbers/${encodeURIComponent(user)}"], a[href*="/climbers/${user}"]`)) {
+        noteSiteProblem(`ascents-${kind}`, `Your ${kind === 'todo' ? 'todo' : 'ascents'} page on thetopo.com didn't look like a list of ascents (no route links, no account links). If you do have ${kind === 'todo' ? 'todos' : 'sends'} there, the site layout may have changed — check for a BetterCrags update.`);
+      }
+    }
     const maxPage = maxPageInPager(doc0);
     if (maxPage > 0) {
       // Bounded fan-out — same ~4-worker pattern as the crag-totals fetches.
@@ -359,29 +255,24 @@
     try {
       const doc = await fetchHtml(`/crags/${encodeURIComponent(cragId)}`);
       const loc = parseCragLocation(doc);
-      const tag = doc.querySelector('script[data-component-name="RouteList"]');
-      if (tag) {
-        try {
-          const store = JSON.parse(tag.textContent);
-          if (store && Array.isArray(store.routes)) {
-            const byGenre = {};
-            const byGrade = {};
-            const byGenreGrade = {};
-            let name = '';
-            for (const r of store.routes) {
-              const g = r.genre || 'Other';
-              byGenre[g] = (byGenre[g] || 0) + 1;
-              const gi = r.grade_int || 0;
-              if (gi) {
-                byGrade[gi] = (byGrade[gi] || 0) + 1;
-                const genreGrade = byGenreGrade[g] || (byGenreGrade[g] = {});
-                genreGrade[gi] = (genreGrade[gi] || 0) + 1;
-              }
-              if (!name) name = r.crag_name || '';
-            }
-            return { name, total: store.routes.length, byGenre, byGrade, byGenreGrade, ...loc };
+      const store = readRouteListStore(doc);
+      if (store && Array.isArray(store.routes)) {
+        const byGenre = {};
+        const byGrade = {};
+        const byGenreGrade = {};
+        let name = '';
+        for (const r of store.routes) {
+          const g = r.genre || 'Other';
+          byGenre[g] = (byGenre[g] || 0) + 1;
+          const gi = r.grade_int || 0;
+          if (gi) {
+            byGrade[gi] = (byGrade[gi] || 0) + 1;
+            const genreGrade = byGenreGrade[g] || (byGenreGrade[g] = {});
+            genreGrade[gi] = (genreGrade[gi] || 0) + 1;
           }
-        } catch {}
+          if (!name) name = r.crag_name || '';
+        }
+        return { name, total: store.routes.length, byGenre, byGrade, byGenreGrade, ...loc };
       }
       // Fallback: count distinct route hrefs.
       const seen = new Set();
@@ -406,9 +297,11 @@
     for (const g of ['Boulder', 'Sport', 'Traditional', 'DWS', 'Other']) qs.set(g, '1');
     try {
       const doc = await fetchHtml(`/areas/${encodeURIComponent(areaParamId)}/routelist?${qs.toString()}`);
-      const tag = doc.querySelector('script[data-component-name="RouteList"]');
-      if (!tag) return [];
-      const store = JSON.parse(tag.textContent);
+      const store = readRouteListStore(doc);
+      if (!store) {
+        noteSiteProblem('area-store', `The area routelist for "${areaParamId}" no longer embeds route data, so ratings, ascent counts and feature tags can't be loaded. thetopo.com may have changed — check for a BetterCrags update.`);
+        return [];
+      }
       return Array.isArray(store.routes) ? store.routes : [];
     } catch {
       return [];
@@ -424,7 +317,7 @@
   async function enrichTodoStatsNow(force) {
     const myKeys = new Set(state.todo.map(r => r.key));
     if (!myKeys.size) { state.routeStats = {}; return; }
-    const cache = (await get(ROUTE_STATS_KEY)) || { stats: {}, areas: {} };
+    const cache = (await storageGet(ROUTE_STATS_KEY)) || { stats: {}, areas: {} };
     cache.stats = cache.stats || {};
     cache.areas = cache.areas || {};
     const now = Date.now();
@@ -441,7 +334,7 @@
       for (const areaId of stale) {
         const routes = await fetchAreaRoutes(areaId);
         for (const rt of routes) {
-          const key = `${rt.crag_param_id || ''}/${rt.param_id || ''}`;
+          const key = routeKeyOf(rt);
           if (myKeys.has(key)) {
             cache.stats[key] = {
               rating: parseFloat(rt.rating) || 0,
@@ -455,7 +348,7 @@
         done++;
         setStatus(`Fetching route ratings (${done}/${stale.length} areas)…`, true);
       }
-      await set(ROUTE_STATS_KEY, cache);
+      await storageSet({ [ROUTE_STATS_KEY]: cache });
     }
     state.routeStats = cache.stats;
   }
@@ -469,7 +362,7 @@
     const routeRows = [...state.done, ...state.todo];
     const wantedKeys = new Set(routeRows.map(r => r.key));
     if (!wantedKeys.size) { state.routeFeatures = {}; return; }
-    const cache = (await get(ROUTE_FEATURES_KEY)) || { features: {}, areas: {} };
+    const cache = (await storageGet(ROUTE_FEATURES_KEY)) || { features: {}, areas: {} };
     cache.features = cache.features || {}; cache.areas = cache.areas || {};
     const now = Date.now();
     const areaIds = new Set();
@@ -489,7 +382,7 @@
         const routes = await fetchAreaRoutes(areaId);
         state.areaRoutes[areaId] = routes;
         for (const route of routes) {
-          const key = `${route.crag_param_id || ''}/${route.param_id || ''}`;
+          const key = routeKeyOf(route);
           if (!wantedKeys.has(key)) continue;
           const features = {};
           for (const tag of FEATURE_KEYS) if (route[tag]) features[tag] = true;
@@ -499,7 +392,7 @@
         completed++;
         setStatus(`Reading climb features (${completed}/${stale.length} areas)…`, true);
       }
-      await set(ROUTE_FEATURES_KEY, cache);
+      await storageSet({ [ROUTE_FEATURES_KEY]: cache });
     }
     state.routeFeatures = cache.features;
   }
@@ -545,10 +438,10 @@
   // Map a raw routelist-store route into a browse item with stats baked in.
   function mapStoreRoute(rt, area) {
     return {
-      key: `${rt.crag_param_id || ''}/${rt.param_id || ''}`,
+      key: routeKeyOf(rt),
       routeName: rt.name || '',
       gradeInt: rt.grade_int || 0,
-      gradeLabel: intToLabel(rt.grade_int || 0, rt.genre || ''),
+      gradeLabel: gradeLabelExact(rt.grade_int || 0, rt.genre || ''),
       genre: rt.genre || '',
       bucket: bucketOf(rt.genre || ''),
       rating: parseFloat(rt.rating) || 0,
@@ -597,7 +490,7 @@
   async function enrichRouteStatsNow(keys) {
     const want = new Set(keys.filter(Boolean));
     if (!want.size) return;
-    const cache = (await get(ROUTE_STATS_KEY)) || { stats: {}, areas: {} };
+    const cache = (await storageGet(ROUTE_STATS_KEY)) || { stats: {}, areas: {} };
     cache.stats = cache.stats || {}; cache.areas = cache.areas || {};
     state.routeStats = cache.stats;
     const now = Date.now();
@@ -613,7 +506,7 @@
       if (!(tot && tot.areaParamId)) cragsNeedingPage.add(k.split('/')[0]);
     }
     if (cragsNeedingPage.size) {
-      const totalsRaw = (await get(CRAG_TOTALS_KEY)) || {};
+      const totalsRaw = (await storageGet(CRAG_TOTALS_KEY)) || {};
       const ids = [...cragsNeedingPage];
       setStatus(`Looking up ${ids.length} crag${ids.length > 1 ? 's' : ''}…`, true);
       let i = 0;
@@ -628,7 +521,7 @@
         }
       };
       await Promise.all(Array.from({ length: 4 }, worker));
-      await set(CRAG_TOTALS_KEY, totalsRaw);
+      await storageSet({ [CRAG_TOTALS_KEY]: totalsRaw });
       state.cragTotals = totalsRaw;
     }
 
@@ -645,7 +538,7 @@
       for (const areaId of stale) {
         const routes = await fetchAreaRoutes(areaId);
         for (const rt of routes) {
-          const key = `${rt.crag_param_id || ''}/${rt.param_id || ''}`;
+          const key = routeKeyOf(rt);
           if (want.has(key)) {
             cache.stats[key] = {
               rating: parseFloat(rt.rating) || 0,
@@ -660,7 +553,7 @@
         setStatus(`Fetching route ratings (${done}/${stale.length} areas)…`, true);
       }
     }
-    await set(ROUTE_STATS_KEY, cache);
+    await storageSet({ [ROUTE_STATS_KEY]: cache });
     state.routeStats = cache.stats;
     setStatus('', false);
   }
@@ -719,6 +612,63 @@
 
   function showStatus() {
     statusEl.hidden = false;
+  }
+
+  // ── Alerts: persistent, dismissible problem banners ──
+  // Unlike the status line (which the next progress message overwrites),
+  // these stay until dismissed — for failed saves and "thetopo changed"
+  // notices the user must actually see. One banner per id; re-showing the
+  // same id replaces its text.
+  function showAlert(id, text, kind) {
+    const host = $('#mc-alerts');
+    if (!host) return;
+    let el = host.querySelector(`[data-alert-id="${CSS.escape(id)}"]`);
+    if (!el) {
+      el = document.createElement('div');
+      el.dataset.alertId = id;
+      el.setAttribute('role', 'alert');
+      el.innerHTML = '<div class="mc-alert-text"></div><button type="button" class="mc-alert-close" aria-label="Dismiss">×</button>';
+      el.querySelector('.mc-alert-close').addEventListener('click', () => el.remove());
+      host.appendChild(el);
+    }
+    el.className = `mc-alert ${kind || 'warn'}`;
+    el.querySelector('.mc-alert-text').textContent = text;
+  }
+  function clearAlert(id) {
+    const el = $('#mc-alerts') && $('#mc-alerts').querySelector(`[data-alert-id="${CSS.escape(id)}"]`);
+    if (el) el.remove();
+  }
+  // A thetopo page didn't look the way we expect. Shown once per problem
+  // per page-load so a broken area doesn't spam a banner per fetch.
+  const siteProblemsNoted = new Set();
+  function noteSiteProblem(id, text) {
+    if (siteProblemsNoted.has(id)) return;
+    siteProblemsNoted.add(id);
+    showAlert(`site-${id}`, text, 'warn');
+  }
+
+  // Surface failed writes. The board is the one thing that isn't re-fetchable,
+  // so a failed board save gets the loudest wording.
+  onStorageError((err) => {
+    if (err.op === 'get') return; // reads fall back to defaults; nothing lost
+    const personal = err.keys.some(k => k === BOARD_KEY || k === PROJECT_SUGGESTIONS_KEY || k === USERNAME_KEY);
+    if (personal) {
+      showAlert('storage-personal', `Couldn't save your tier-lists (${err.message}). Your latest edits are NOT saved — use Backup to export them now, then try "Clear cache" to free space.`, 'error');
+    } else {
+      showAlert('storage-cache', `Couldn't write cached crag/route data (${err.message}). The dashboard still works, but will re-fetch next time. Try "Clear cache" if this keeps happening.`, 'warn');
+    }
+    updateStorageInfo();
+  });
+
+  // Footer line: how much of chrome.storage.local we're using. Mostly for
+  // diagnosing "Clear cache" needs; the manifest requests unlimitedStorage so
+  // there's no hard cap, but a multi-MB store is worth knowing about.
+  async function updateStorageInfo() {
+    const el = $('#mc-storage-info');
+    if (!el) return;
+    const [total, board] = await Promise.all([storageBytesInUse(), storageBytesInUse([BOARD_KEY])]);
+    if (total == null) { el.textContent = ''; return; }
+    el.textContent = `Storage: ${formatBytes(total)} used (lists ${formatBytes(board)}, caches ${formatBytes(Math.max(0, total - (board || 0)))}).`;
   }
 
   function uniqGenres(rows) {
@@ -825,7 +775,7 @@
       const g = r.genre || 'Other';
       const prev = map.get(g);
       if (!prev || r.gradeInt > prev.gi) {
-        map.set(g, { gi: r.gradeInt, label: r.gradeLabel || intToLabel(r.gradeInt, g) });
+        map.set(g, { gi: r.gradeInt, label: r.gradeLabel || gradeLabelExact(r.gradeInt, g) });
       }
     }
     return map;
@@ -1007,7 +957,7 @@
     const CAP = 25;
     const sorted = todos.slice().sort((a, b) => (b.gradeInt || 0) - (a.gradeInt || 0));
     const rows = sorted.slice(0, CAP).map(t => {
-      const g = t.gradeLabel || (t.gradeInt ? intToLabel(t.gradeInt, t.genre) : '') || '—';
+      const g = t.gradeLabel || (t.gradeInt ? gradeLabelExact(t.gradeInt, t.genre) : '') || '—';
       return `<div class="row"><span class="r">${escapeHtml(t.routeName || 'Unnamed route')}</span><span class="g">${escapeHtml(g)}</span></div>`;
     }).join('');
     const more = sorted.length > CAP ? `<div class="more">+${sorted.length - CAP} more…</div>` : '';
@@ -1072,7 +1022,7 @@
       const totalKnown = c.total != null && c.total > 0;
       const pct = totalKnown ? Math.min(100, (doneAtCrag / c.total) * 100) : null;
       const hardestG = hardestTodoGi
-        ? intToLabel(hardestTodoGi, (todos.find(t => t.gradeInt === hardestTodoGi) || {}).genre)
+        ? gradeLabelExact(hardestTodoGi, (todos.find(t => t.gradeInt === hardestTodoGi) || {}).genre)
         : '';
       return `
         <div class="mc-next-item">
@@ -1129,7 +1079,7 @@
       if (highest) gradeTargetByGenre.set(genre, highest + ((grades.get(highest) || 0) >= PROJECT_GRADE_PROMOTION_SENDS ? 50 : 0));
     }
     const targetText = [...gradeTargetByGenre.entries()]
-      .map(([genre, grade]) => `${genre} through ${intToLabel(grade, genre)}`).join(' · ');
+      .map(([genre, grade]) => `${genre} through ${gradeLabelExact(grade, genre)}`).join(' · ');
     const sub = card.querySelector('.mc-card-sub');
     if (sub && targetText) sub.textContent = `Full grade match: ${targetText}. A level advances after ${PROJECT_GRADE_PROMOTION_SENDS} sends at your current top grade.`;
     const doneKeys = new Set(state.done.map(r => r.key));
@@ -1141,12 +1091,12 @@
     const candidates = [];
     for (const [areaId, routes] of Object.entries(state.areaRoutes)) {
       for (const raw of routes) {
-        const key = `${raw.crag_param_id || ''}/${raw.param_id || ''}`;
+        const key = routeKeyOf(raw);
         if (!key || doneKeys.has(key) || state.dismissedProjectKeys.has(key)) continue;
         candidates.push({
           key, cragId: raw.crag_param_id || '', cragName: raw.crag_name || '',
           routeName: raw.name || '', gradeInt: raw.grade_int || 0,
-          gradeLabel: intToLabel(raw.grade_int || 0, raw.genre || ''), genre: raw.genre || '',
+          gradeLabel: gradeLabelExact(raw.grade_int || 0, raw.genre || ''), genre: raw.genre || '',
           areaId, area: areaLabelById.get(areaId) || 'Unknown', raw,
           isTodo: todoKeys.has(key),
         });
@@ -1241,7 +1191,7 @@
         return tag;
       });
       return `<article class="mc-project-item">
-        <div class="mc-project-name"><span class="mc-project-grade">${escapeHtml(route.gradeLabel || intToLabel(route.gradeInt, route.genre))}</span><a href="${href}" target="_blank" rel="noopener">${escapeHtml(route.routeName || 'Unnamed route')}</a></div>
+        <div class="mc-project-name"><span class="mc-project-grade">${escapeHtml(route.gradeLabel || gradeLabelExact(route.gradeInt, route.genre))}</span><a href="${href}" target="_blank" rel="noopener">${escapeHtml(route.routeName || 'Unnamed route')}</a></div>
         <div class="mc-project-crag">${escapeHtml(route.cragName || route.cragId)}${route.area ? ` · ${escapeHtml(route.area)}` : ''}</div>
         <div class="mc-project-pills"><span class="${route.isTodo ? 'is-todo' : 'is-new'}">${route.isTodo ? 'On todo' : 'New suggestion'}</span>${tagLabels.map(label => `<span>${escapeHtml(label)}</span>`).join('') || '<span>Untagged</span>'}</div>
         <div class="mc-project-why">${Math.round(gradeFit * 100)}% grade fit · ${Math.round(featureFit * 100)}% style fit · ${stats.rating ? `${adjustedRating.toFixed(1)}★ confidence` : 'unrated'} · ${stats.ascents} ascents</div>
@@ -1281,7 +1231,6 @@
   }
 
   // ── To-do tierlists: drag todos into S/A/B/C tiers, saved as lists ──
-  const PB_TIERS = ['S', 'A', 'B', 'C'];
 
   function bucketOf(genre) {
     return genre === 'Boulder' ? 'Boulder' : genre === 'Sport' ? 'Sport' : 'Other';
@@ -1294,25 +1243,8 @@
     for (let i = 1; i <= MAX_STARS; i++) s += i <= full ? '★' : '☆';
     return s;
   }
-  function genId() {
-    return Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
-  }
-  function slug(s) {
-    return String(s || 'list').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'list';
-  }
-  function defaultList(name) {
-    return { id: genId(), name: name || 'My projects', genre: 'all', areas: null, gradeMin: null, gradeMax: null, tiers: {}, order: {}, notes: {} };
-  }
-  // A "dream"/custom list isn't backed by your todos — you build it by searching
-  // and adding routes, which are stored on the list itself (like imported lists).
-  function defaultCustomList(name) {
-    const l = defaultList(name || 'Dream list');
-    l.custom = true;
-    l.items = [];
-    return l;
-  }
   function defaultBoard() {
-    const l = defaultList('My projects');
+    const l = makeList('My projects');
     return { version: 2, lists: [l], activeListId: l.id };
   }
   // A list is "stored" (self-contained) when it carries its own item snapshot —
@@ -1328,7 +1260,11 @@
   let lastBoardWrite = null;
   function writeBoard() {
     lastBoardWrite = JSON.stringify(state.board);
-    set(BOARD_KEY, state.board);
+    storageSet({ [BOARD_KEY]: state.board }).then(ok => {
+      // onStorageError already raised the banner on failure; on success,
+      // clear a stale one so the user knows they're safe again.
+      if (ok) clearAlert('storage-personal');
+    });
   }
   function saveBoard() {
     if (boardSaveTimer) clearTimeout(boardSaveTimer);
@@ -1348,11 +1284,11 @@
   });
 
   async function loadBoard() {
-    let b = await get(BOARD_KEY);
+    let b = await storageGet(BOARD_KEY);
     if (!b) {
       // Migrate from the v1 single-list board if present.
       b = defaultBoard();
-      const old = await get(BOARD_KEY_V1);
+      const old = await storageGet(BOARD_KEY_V1);
       if (old) {
         if (old.tiers) b.lists[0].tiers = old.tiers;
         if (old.notes) b.lists[0].notes = old.notes;
@@ -1360,7 +1296,10 @@
         if (old.areas) b.lists[0].areas = old.areas;
       }
     }
-    if (!Array.isArray(b.lists) || !b.lists.length) b.lists = [defaultList('My projects')];
+    if (!Array.isArray(b.lists) || !b.lists.length) b.lists = [makeList('My projects')];
+    // Fill in fields older versions didn't write. (Deliberately not
+    // sanitizeList: a stored board is ours, and a strict pass could drop
+    // data a future version writes that this one doesn't know about.)
     for (const l of b.lists) {
       l.tiers = l.tiers || {};
       l.order = l.order || {};
@@ -1392,7 +1331,7 @@
         routeName: r.routeName || '',
         cragName: r.cragName || tot.name || r.cragId,
         area: tot.area || '',
-        gradeLabel: r.gradeLabel || (gradeInt ? intToLabel(gradeInt, genre) : ''),
+        gradeLabel: r.gradeLabel || (gradeInt ? gradeLabelExact(gradeInt, genre) : ''),
         gradeInt,
         bucket: bucketOf(genre),
         genreKnown: !!genre,
@@ -1421,7 +1360,7 @@
       routeName: it.routeName || '',
       cragName: it.cragName || tot.name || cragId,
       area: it.area || tot.area || '',
-      gradeLabel: it.gradeLabel || (gradeInt ? intToLabel(gradeInt, genre) : ''),
+      gradeLabel: it.gradeLabel || (gradeInt ? gradeLabelExact(gradeInt, genre) : ''),
       gradeInt,
       bucket: bucketOf(genre),
       genreKnown: !!genre,
@@ -1502,13 +1441,13 @@
     mkBtn('+ New', 'New list from your todos', () => {
       const name = (prompt('Name for the new todo list:', 'New list') || '').trim();
       if (!name) return;
-      const l = defaultList(name);
+      const l = makeList(name);
       b.lists.push(l); b.activeListId = l.id; boardBrowse = null; saveBoard(); renderBoard();
     });
     mkBtn('+ Dream', 'New dream/trip list — add any routes by search', () => {
       const name = (prompt('Name for the dream/trip list:', 'Dream list') || '').trim();
       if (!name) return;
-      const l = defaultCustomList(name);
+      const l = makeCustomList(name);
       b.lists.push(l); b.activeListId = l.id; boardBrowse = null; saveBoard(); renderBoard();
     });
     mkBtn('Rename', 'Rename this list', () => {
@@ -1518,7 +1457,7 @@
     });
     mkBtn('Duplicate', 'Duplicate this list', () => {
       const copy = JSON.parse(JSON.stringify(list));
-      copy.id = genId(); copy.name = `${list.name} copy`;
+      copy.id = bcGenId(); copy.name = `${list.name} copy`;
       b.lists.push(copy); b.activeListId = copy.id; boardBrowse = null; saveBoard(); renderBoard();
     });
     mkBtn('Export', 'Download this list as a shareable JSON', () => exportList(list));
@@ -1604,7 +1543,7 @@
       const any = document.createElement('option'); any.value = ''; any.textContent = 'Any'; s.appendChild(any);
       for (const gi of gis) {
         const o = document.createElement('option'); o.value = String(gi);
-        o.textContent = intToLabel(gi, labelGenre);
+        o.textContent = gradeLabelExact(gi, labelGenre);
         if (val === gi) o.selected = true;
         s.appendChild(o);
       }
@@ -1701,15 +1640,15 @@
 
     const opts = { markers: stored, removable: stored };
     const groups = { '': [] };
-    for (const t of PB_TIERS) groups[t] = [];
+    for (const t of TIERS) groups[t] = [];
     for (const it of items) {
       const t = list.tiers[it.key];
-      groups[PB_TIERS.includes(t) ? t : ''].push(it);
+      groups[TIERS.includes(t) ? t : ''].push(it);
     }
     const ord = k => (list.order[k] == null ? 1e9 : list.order[k]);
     for (const k of Object.keys(groups)) groups[k].sort((a, b) => ord(a.key) - ord(b.key));
 
-    const tierRows = PB_TIERS.map(t => `
+    const tierRows = TIERS.map(t => `
       <div class="mc-tl-row">
         <div class="mc-tl-label tier-${t}">${t}</div>
         <div class="mc-tl-drop" data-tier="${t}">${groups[t].map(it => cardHtml(it, list.notes[it.key], opts)).join('')}</div>
@@ -1883,7 +1822,7 @@
     const genreOpts = ['all', ...['Boulder', 'Sport', 'Other'].filter(g => present.has(g))];
     const gis = [...new Set(b.routes.map(r => r.gradeInt).filter(g => g > 0))].sort((x, y) => x - y);
     const labelGenre = b.genre === 'Sport' ? 'Sport' : 'Boulder';
-    const gradeOpt = (val) => `<option value="">Any</option>` + gis.map(gi => `<option value="${gi}"${val === gi ? ' selected' : ''}>${escapeHtml(intToLabel(gi, labelGenre))}</option>`).join('');
+    const gradeOpt = (val) => `<option value="">Any</option>` + gis.map(gi => `<option value="${gi}"${val === gi ? ' selected' : ''}>${escapeHtml(gradeLabelExact(gi, labelGenre))}</option>`).join('');
     browseEl.innerHTML = `
       <div class="mc-pb-browse-h">
         <button type="button" class="mc-pb-browse-back">← search</button>
@@ -1980,7 +1919,7 @@
       username: state.user || '',
       name: list.name,
       exportedAt: Date.now(),
-      tiers: PB_TIERS,
+      tiers: TIERS,
       items: items.map(it => ({
         key: it.key,
         routeName: it.routeName,
@@ -2009,40 +1948,106 @@
       alert('That doesn\'t look like a BetterCrags tierlist file.');
       return;
     }
-    const l = defaultList(String(obj.name || 'Imported list'));
-    l.imported = true;
-    l.sourceUser = String(obj.username || '');
-    // Validate/sanitize every imported item: the file is untrusted JSON, so
-    // require a usable key, coerce numbers to numbers and text to strings,
-    // and drop anything malformed rather than persisting it.
-    l.items = [];
-    const seenKeys = new Set();
+    // The file is untrusted JSON: the per-item tier/order/note live on each
+    // item in the export format, so lift them into list maps and let
+    // sanitizeList validate everything (keys, numbers, tiers).
+    const tiers = {}, order = {}, notes = {};
     for (const it of obj.items) {
-      if (!it || typeof it !== 'object') continue;
-      const key = typeof it.key === 'string' ? it.key.trim() : '';
-      if (!key || !key.includes('/') || seenKeys.has(key)) continue;
-      seenKeys.add(key);
-      l.items.push({
-        key,
-        routeName: String(it.routeName || ''),
-        cragName: String(it.cragName || ''),
-        area: String(it.area || ''),
-        gradeLabel: String(it.gradeLabel || ''),
-        gradeInt: Number(it.gradeInt) || 0,
-        genre: String(it.genre || ''),
-        rating: Number(it.rating) || 0,
-        ascents: Number(it.ascents) || 0,
-      });
-      if (typeof it.tier === 'string' && PB_TIERS.includes(it.tier)) l.tiers[key] = it.tier;
-      if (it.order != null && !isNaN(Number(it.order))) l.order[key] = Number(it.order);
-      if (it.note) l.notes[key] = String(it.note);
+      if (!it || typeof it !== 'object' || typeof it.key !== 'string') continue;
+      const key = it.key.trim();
+      if (it.tier) tiers[key] = it.tier;
+      if (it.order != null) order[key] = it.order;
+      if (it.note) notes[key] = it.note;
     }
+    const l = sanitizeList({ name: obj.name || 'Imported list', items: obj.items, tiers, order, notes, imported: true, sourceUser: obj.username || '' });
+    if (!l) { alert('That doesn\'t look like a BetterCrags tierlist file.'); return; }
+    l.id = bcGenId(); // never trust an id from a file — it must not collide with a local list
     state.board.lists.push(l);
     state.board.activeListId = l.id;
     boardBrowse = null;
     saveBoard();
     renderBoard();
     setStatus(`Imported list "${l.name}"${l.sourceUser ? ` from ${l.sourceUser}` : ''} (${l.items.length} routes).`, false);
+  }
+
+  // ── Full backup / restore ──
+  // Everything that isn't re-fetchable from thetopo, in one file: every
+  // tier-list (live and stored), notes, dismissed suggestions, filter and
+  // dark-mode settings. Reloading the unpacked extension from a new folder
+  // (or uninstalling) wipes chrome.storage, so this is the user's safety net.
+  async function exportBackup() {
+    const keys = [BOARD_KEY, PROJECT_SUGGESTIONS_KEY, STORAGE_KEYS.FILTER_STATE, STORAGE_KEYS.DARK_MODE, USERNAME_KEY];
+    const stored = await storageGet(keys);
+    flushBoardSave();
+    const out = {
+      bettercrags_backup: 1,
+      extensionVersion: (chrome.runtime.getManifest && chrome.runtime.getManifest().version) || '',
+      exportedAt: new Date().toISOString(),
+      username: stored[USERNAME_KEY] || state.user || '',
+      board: state.board || stored[BOARD_KEY] || null,
+      dismissedProjects: stored[PROJECT_SUGGESTIONS_KEY] || {},
+      filterState: stored[STORAGE_KEYS.FILTER_STATE] || null,
+      darkMode: !!stored[STORAGE_KEYS.DARK_MODE],
+    };
+    const blob = new Blob([JSON.stringify(out, null, 2)], { type: 'application/json' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `bettercrags-backup-${out.exportedAt.slice(0, 10)}.json`;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+    const n = out.board && Array.isArray(out.board.lists) ? out.board.lists.length : 0;
+    setStatus(`Backup saved (${n} list${n === 1 ? '' : 's'}).`, false);
+  }
+
+  // Merge a backup into the current state: lists with a matching id are
+  // replaced by the backup's copy, unknown ids are added, local lists the
+  // backup doesn't know are kept. Settings are only restored when present.
+  async function restoreBackup(obj) {
+    if (!obj || obj.bettercrags_backup == null || !obj.board || !Array.isArray(obj.board.lists)) {
+      alert('That doesn\'t look like a BetterCrags backup file (expected a "bettercrags_backup" JSON export).');
+      return;
+    }
+    const lists = obj.board.lists.map(sanitizeList).filter(Boolean);
+    if (!lists.length) { alert('The backup contains no usable lists.'); return; }
+    if (!state.board) await loadBoard();
+    const existing = new Map(state.board.lists.map(l => [l.id, l]));
+    const replaced = lists.filter(l => existing.has(l.id)).length;
+    const added = lists.length - replaced;
+    const when = obj.exportedAt ? ` from ${String(obj.exportedAt).slice(0, 10)}` : '';
+    if (!confirm(`Restore backup${when}?\n\n• ${added} list${added === 1 ? '' : 's'} will be added\n• ${replaced} list${replaced === 1 ? '' : 's'} with the same id will be replaced by the backup's version\n• other local lists are kept\n\nThis can't be undone (take a Backup first if unsure).`)) return;
+
+    for (const l of lists) {
+      const idx = state.board.lists.findIndex(x => x.id === l.id);
+      if (idx >= 0) state.board.lists[idx] = l; else state.board.lists.push(l);
+    }
+    if (typeof obj.board.activeListId === 'string' && state.board.lists.some(l => l.id === obj.board.activeListId)) {
+      state.board.activeListId = obj.board.activeListId;
+    }
+    const writes = {};
+    if (obj.dismissedProjects && typeof obj.dismissedProjects === 'object') {
+      const merged = { ...state.dismissedProjectsByUser };
+      for (const [user, keys] of Object.entries(obj.dismissedProjects)) {
+        if (!Array.isArray(keys)) continue;
+        merged[user] = [...new Set([...(merged[user] || []), ...keys.filter(k => typeof k === 'string')])];
+      }
+      state.dismissedProjectsByUser = merged;
+      if (state.user) state.dismissedProjectKeys = new Set(merged[state.user] || []);
+      writes[PROJECT_SUGGESTIONS_KEY] = merged;
+    }
+    if (obj.filterState && typeof obj.filterState === 'object') writes[STORAGE_KEYS.FILTER_STATE] = obj.filterState;
+    if (typeof obj.darkMode === 'boolean') writes[STORAGE_KEYS.DARK_MODE] = obj.darkMode;
+    if (!state.user && typeof obj.username === 'string' && obj.username.trim()) {
+      writes[USERNAME_KEY] = obj.username.trim();
+      $('#mc-user-input').value = obj.username.trim();
+    }
+    boardBrowse = null;
+    writeBoard();
+    const ok = Object.keys(writes).length ? await storageSet(writes) : true;
+    renderBoard();
+    renderProjectSuggestions();
+    setStatus(ok
+      ? `Restored ${lists.length} list${lists.length === 1 ? '' : 's'} (${added} added, ${replaced} replaced).`
+      : 'Lists restored, but some settings could not be saved — see the warning above.', false, !ok);
   }
 
   let boardWired = false;
@@ -2298,7 +2303,7 @@
       const rows = entries.map(e => {
         const cragName = (state.cragsAggregated.get(e.cragId) || {}).name || e.cragId;
         return `<div class="mc-firsts-row">
-          <span class="g">${escapeHtml(e.gradeLabel || intToLabel(e.gi, genre))}</span>
+          <span class="g">${escapeHtml(e.gradeLabel || gradeLabelExact(e.gi, genre))}</span>
           <span class="c"><a href="https://thetopo.com/crags/${escapeHtml(encodeURIComponent(e.cragId))}" target="_blank" rel="noopener">${escapeHtml(cragName)}</a> — ${escapeHtml(e.routeName || '')}</span>
           <span class="d">${escapeHtml(e.date || '')}</span>
         </div>`;
@@ -2394,7 +2399,7 @@
       stats.push({
         l: `Sends at hardest ${g}`,
         v: p.count,
-        h: intToLabel(p.gi, g),
+        h: gradeLabelExact(p.gi, g),
       });
     }
 
@@ -2771,6 +2776,7 @@
     renderFirsts();
     renderStats();
     updateCacheInfo();
+    updateStorageInfo();
   }
 
   function updateCacheInfo() {
@@ -2795,7 +2801,7 @@
     }
     if (!missing.length) return;
 
-    const fetchedRaw = (await get(CRAG_FETCH_CACHE_KEY)) || {};
+    const fetchedRaw = (await storageGet(CRAG_FETCH_CACHE_KEY)) || {};
     const now = Date.now();
     const toFetch = missing.filter(id => {
       const f = fetchedRaw[id];
@@ -2806,7 +2812,7 @@
     setStatus(`Fetching crag totals (0/${toFetch.length})…`, true);
     const CONCURRENCY = 4;
     let i = 0, completed = 0;
-    const totalsRaw = (await get(CRAG_TOTALS_KEY)) || {};
+    const totalsRaw = (await storageGet(CRAG_TOTALS_KEY)) || {};
 
     async function worker() {
       while (i < toFetch.length) {
@@ -2828,14 +2834,14 @@
       }
     }
     await Promise.all(Array.from({ length: CONCURRENCY }, worker));
-    await set(CRAG_TOTALS_KEY, totalsRaw);
-    await set(CRAG_FETCH_CACHE_KEY, fetchedRaw);
+    await storageSet({ [CRAG_TOTALS_KEY]: totalsRaw });
+    await storageSet({ [CRAG_FETCH_CACHE_KEY]: fetchedRaw });
     state.cragTotals = totalsRaw;
   }
 
   // ── Boot ──────────────────────────────────────────────────────────
   async function ensureUsername() {
-    const stored = await get(USERNAME_KEY);
+    const stored = await storageGet(USERNAME_KEY);
     const input = $('#mc-user-input');
     if (stored) {
       input.value = stored;
@@ -2845,7 +2851,7 @@
   }
 
   async function loadAscents(useCache, user) {
-    const cached = await get(ASCENTS_CACHE_KEY);
+    const cached = await storageGet(ASCENTS_CACHE_KEY);
     const now = Date.now();
     if (useCache && cached && cached.user === user && (now - (cached.t || 0)) < CACHE_TTL_MS) {
       state.done = cached.done || [];
@@ -2860,7 +2866,7 @@
     ]);
     state.done = done;
     state.todo = todo;
-    await set(ASCENTS_CACHE_KEY, { user, t: Date.now(), done, todo });
+    await storageSet({ [ASCENTS_CACHE_KEY]: { user, t: Date.now(), done, todo } });
     setStatus(`Fetched ${done.length} sends and ${todo.length} todos.`, false);
     return false;
   }
@@ -2880,8 +2886,8 @@
     const changed = todo.length !== state.todo.length || todo.some(r => !before.has(r.key));
     if (!changed) return;
     state.todo = todo;
-    const cached = (await get(ASCENTS_CACHE_KEY)) || {};
-    await set(ASCENTS_CACHE_KEY, { user, t: cached.t || Date.now(), done: state.done, todo });
+    const cached = (await storageGet(ASCENTS_CACHE_KEY)) || {};
+    await storageSet({ [ASCENTS_CACHE_KEY]: { user, t: cached.t || Date.now(), done: state.done, todo } });
     aggregate();
     await fillMissingCragTotals();
     await enrichDoneFeatures(false);
@@ -2896,7 +2902,7 @@
   async function loadAllForUser(user, useCache) {
     const gen = ++renderGen;
     state.user = user;
-    state.cragTotals = (await get(CRAG_TOTALS_KEY)) || {};
+    state.cragTotals = (await storageGet(CRAG_TOTALS_KEY)) || {};
     await loadBoard();
     await loadDismissedProjects(user);
     if (gen !== renderGen) return;
@@ -2949,7 +2955,7 @@
       const btn = $('#mc-refresh');
       btn.disabled = true;
       try {
-        await set(USERNAME_KEY, user);
+        await storageSet({ [USERNAME_KEY]: user });
         await loadAllForUser(user, false);
       } catch (err) {
         setStatus(`Refresh failed: ${err && err.message || err}`, false, true);
@@ -2961,18 +2967,31 @@
     $('#mc-clear').addEventListener('click', async () => {
       // Caches only — the project board (priorities/tiers/notes) is personal
       // data and deliberately survives a cache clear.
-      try {
-        await remove([ASCENTS_CACHE_KEY, CRAG_FETCH_CACHE_KEY, ROUTE_STATS_KEY, ROUTE_FEATURES_KEY, CRAG_TOTALS_KEY]);
-        state.cragTotals = {};
-        state.routeStats = {};
-        state.routeFeatures = {};
-        state.areaRoutes = {};
-        state.enrichTried.clear();
-        setStatus('Cache cleared. Hit Refresh to re-fetch.', false);
-        updateCacheInfo();
-      } catch (err) {
-        setStatus(`Couldn't clear cache: ${err && err.message || err}`, false, true);
-      }
+      const ok = await storageRemove(CACHE_KEYS);
+      if (!ok) { setStatus('Couldn\'t clear the cache — see the browser console.', false, true); return; }
+      state.cragTotals = {};
+      state.routeStats = {};
+      state.routeFeatures = {};
+      state.areaRoutes = {};
+      state.enrichTried.clear();
+      clearAlert('storage-cache');
+      setStatus('Cache cleared. Hit Refresh to re-fetch.', false);
+      updateCacheInfo();
+      updateStorageInfo();
+    });
+    $('#mc-backup').addEventListener('click', () => exportBackup());
+    $('#mc-restore').addEventListener('click', () => $('#mc-restore-file').click());
+    $('#mc-restore-file').addEventListener('change', () => {
+      const input = $('#mc-restore-file');
+      const file = input.files && input.files[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = async () => {
+        try { await restoreBackup(JSON.parse(reader.result)); }
+        catch (err) { alert(`Couldn't read that backup: ${err && err.message || err}`); }
+        input.value = '';
+      };
+      reader.readAsText(file);
     });
     // Cross-tab sync: re-render when another mycrags tab saves the board.
     // The echo of this tab's own save is matched against the snapshot taken at

@@ -14,7 +14,10 @@
       <div class="mc-id">
         <input type="text" id="mc-user-input" placeholder="thetopo username" autocomplete="off" />
         <button type="button" id="mc-refresh" title="Re-fetch ascents and todo">Refresh</button>
-        <button type="button" id="mc-clear" title="Clear all caches and start fresh">Clear cache</button>
+        <button type="button" id="mc-clear" title="Clear cached crag/route data (your lists and settings are kept)">Clear cache</button>
+        <button type="button" id="mc-backup" title="Download every tier-list, note and setting as one JSON file">Backup</button>
+        <button type="button" id="mc-restore" title="Restore lists and settings from a backup file">Restore</button>
+        <input type="file" id="mc-restore-file" accept="application/json,.json" hidden />
       </div>
     </header>
 
@@ -27,6 +30,8 @@
       <div class="mc-spinner" hidden id="mc-spinner"></div>
       <div class="mc-status-text" id="mc-status-text">Detecting account…</div>
     </section>
+    <!-- Persistent, dismissible problems: failed saves, unrecognised thetopo pages. -->
+    <div id="mc-alerts" class="mc-alerts"></div>
 
     <div id="mc-tab-dashboard" class="mc-tab-panel">
       <section class="mc-card" id="mc-profile-card" hidden>
@@ -145,6 +150,7 @@
 
     <footer class="mc-footer">
       <span id="mc-cache-info" aria-live="polite"></span>
+      <span id="mc-storage-info"></span>
     </footer>
 
     <script src="shared.js"></script>

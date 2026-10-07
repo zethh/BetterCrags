@@ -1,38 +1,15 @@
 (() => {
   'use strict';
 
-  const TAGS = [
-    ['crimpers', 'Crimps'],
-    ['slopers', 'Slopers'],
-    ['jugs', 'Jugs'],
-    ['fingery', 'Fingery'],
-    ['pockets', 'Pockets'],
-    ['powerful', 'Powerful'],
-    ['dyno', 'Dyno'],
-    ['endurance', 'Endurance'],
-    ['technical', 'Technical'],
-    ['mental', 'Mental'],
-    ['dangerous', 'Dangerous'],
-    ['slab', 'Slab'],
-    ['vertical', 'Vertical'],
-    ['overhang', 'Overhang'],
-    ['roof', 'Roof'],
-    ['traverse', 'Traverse'],
-    ['sitstart', 'Sit start'],
-    ['topslasthold', 'Top/last hold'],
-    ['crack', 'Crack'],
-    ['tufas', 'Tufas'],
-    ['tradgear_required', 'Trad gear'],
-  ];
-
-  // Display groupings for the feature pills.
-  const TAG_GROUPS = [
-    ['Hold type', ['crimpers', 'slopers', 'jugs', 'pockets', 'tufas', 'crack']],
-    ['Wall angle', ['roof', 'overhang', 'vertical', 'slab']],
-    ['Style', ['fingery', 'powerful', 'dyno', 'endurance', 'technical', 'mental', 'traverse']],
-    ['Other', ['sitstart', 'topslasthold', 'tradgear_required', 'dangerous']],
-  ];
-  const TAG_LABELS = Object.fromEntries(TAGS);
+  // Grade tables, feature tags, storage wrappers + the "+ list" menu live in
+  // shared.js (loaded first via manifest).
+  const {
+    FONT_GRADES, FRENCH_GRADES, escapeHtml, gradeLabelFor, openListMenu,
+    FEATURE_TAGS: TAGS, FEATURE_LABELS: TAG_LABELS, FEATURE_GROUPS,
+    STORAGE_KEYS, storageGet, storageSet, routeKeyOf, readRouteListStore, maxPageInPager,
+  } = window.BCShared;
+  // Display groupings for the feature pills: [groupLabel, [key, …]].
+  const TAG_GROUPS = FEATURE_GROUPS.map(([label, tags]) => [label, tags.map(([k]) => k)]);
 
   const PROMO_MARKERS = [
     'climbing guide to your smartphone',
@@ -40,11 +17,6 @@
     "Use topos even when there's no Internet",
     'high-quality topo images',
   ];
-
-  // 27crags-style numeric → climbing label. Source values empirically chosen.
-  // Boulder uses Font, sport/trad uses French.
-  // Grade tables + escapeHtml live in shared.js (loaded first via manifest).
-  const { FONT_GRADES, FRENCH_GRADES, escapeHtml, gradeLabelFor, openListMenu } = window.BCShared;
 
   const SORT_OPTIONS = [
     ['rating_desc', 'Rating ↓'],
@@ -85,22 +57,17 @@
     : requestAnimationFrame(cb);
   const PLACEHOLDER_IMG = 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
 
-  const STATE_KEY = 'bc_filter_state_v1';
-  function loadSavedState() {
-    return new Promise((resolve) => {
-      try {
-        chrome.storage.local.get(STATE_KEY, (o) => resolve((o && o[STATE_KEY]) || null));
-      } catch { resolve(null); }
-    });
-  }
-  function persistState(state) {
-    try { chrome.storage.local.set({ [STATE_KEY]: state }); } catch {}
-  }
+  const STATE_KEY = STORAGE_KEYS.FILTER_STATE;
+  function loadSavedState() { return storageGet(STATE_KEY); }
+  // Resolves false (after logging) when the write fails; callers that care
+  // about the user noticing (filter state) surface it in the panel.
+  function persistState(state) { return storageSet({ [STATE_KEY]: state }); }
 
-  const META_CACHE_KEY = 'bc_meta_cache_v1';
+  const META_CACHE_KEY = STORAGE_KEYS.META_CACHE;
   const META_TTL_MS = 7 * 24 * 60 * 60 * 1000;
-  const CRAG_TOTALS_KEY = 'bc_crag_totals_v1';
+  const CRAG_TOTALS_KEY = STORAGE_KEYS.CRAG_TOTALS;
   const CRAG_TOTALS_TTL_MS = 90 * 24 * 60 * 60 * 1000;
+  const USERNAME_KEY = STORAGE_KEYS.USERNAME;
 
   // Build per-crag totals (counts + grade histogram) from a route array, so
   // visiting an area routelist incrementally fills the My Crags cache for
@@ -127,32 +94,24 @@
     }
     return byCrag;
   }
-  function persistCragTotals(byCrag) {
+  async function persistCragTotals(byCrag) {
     if (!byCrag || !byCrag.size) return;
-    try {
-      chrome.storage.local.get(CRAG_TOTALS_KEY, (o) => {
-        const existing = (o && o[CRAG_TOTALS_KEY]) || {};
-        const now = Date.now();
-        // Prune stale entries while we're merging — keeps the store bounded.
-        for (const [id, data] of Object.entries(existing)) {
-          if (!data || !data.t || (now - data.t) > CRAG_TOTALS_TTL_MS) delete existing[id];
-        }
-        for (const [id, data] of byCrag) {
-          existing[id] = { ...data, t: now };
-        }
-        chrome.storage.local.set({ [CRAG_TOTALS_KEY]: existing });
-      });
-    } catch {}
+    const existing = (await storageGet(CRAG_TOTALS_KEY)) || {};
+    const now = Date.now();
+    // Prune stale entries while we're merging — keeps the store bounded.
+    for (const [id, data] of Object.entries(existing)) {
+      if (!data || !data.t || (now - data.t) > CRAG_TOTALS_TTL_MS) delete existing[id];
+    }
+    for (const [id, data] of byCrag) {
+      existing[id] = { ...data, t: now };
+    }
+    await storageSet({ [CRAG_TOTALS_KEY]: existing });
   }
-  function loadMetaCacheRaw() {
-    return new Promise((resolve) => {
-      try {
-        chrome.storage.local.get(META_CACHE_KEY, (o) => resolve((o && o[META_CACHE_KEY]) || {}));
-      } catch { resolve({}); }
-    });
+  async function loadMetaCacheRaw() {
+    return (await storageGet(META_CACHE_KEY)) || {};
   }
   function saveMetaCacheRaw(obj) {
-    try { chrome.storage.local.set({ [META_CACHE_KEY]: obj }); } catch {}
+    return storageSet({ [META_CACHE_KEY]: obj });
   }
   function captureState(panel) {
     return {
@@ -224,17 +183,9 @@
   }
 
   function readEmbeddedStore() {
-    const tag = document.querySelector('script[data-component-name="RouteList"]');
-    if (!tag) return null;
-    try {
-      return JSON.parse(tag.textContent);
-    } catch (err) {
-      warn('failed to parse RouteList JSON', err);
-      return null;
-    }
+    return readRouteListStore(document);
   }
 
-  const USERNAME_KEY = 'bc_username_v1';
   function usernameFromLink(a) {
     const m = (a.getAttribute('href') || '').match(/^\/climbers\/([^/?#]+)(?:[/?#]|$)/);
     return (m && m[1] && !['top', 'index', 'search'].includes(m[1])) ? m[1] : null;
@@ -260,7 +211,7 @@
   }
   function persistUsername(user) {
     if (!user) return;
-    try { chrome.storage.local.set({ [USERNAME_KEY]: user }); } catch {}
+    storageSet({ [USERNAME_KEY]: user });
   }
 
   function extractRouteKeysInto(doc, set) {
@@ -271,16 +222,6 @@
       if (m) set.add(`${decodeURIComponent(m[1])}/${decodeURIComponent(m[2])}`);
     }
     return set.size - before;
-  }
-  function maxPageInPager(doc) {
-    const pager = doc.querySelector('#table-pager');
-    if (!pager) return 0;
-    let mx = 0;
-    for (const a of pager.querySelectorAll('a[data-page]')) {
-      const p = +a.getAttribute('data-page');
-      if (!isNaN(p)) mx = Math.max(mx, p);
-    }
-    return mx;
   }
   async function fetchPage(url, page, signal) {
     const u = new URL(url, location.origin);
@@ -717,9 +658,9 @@
       if (!res.ok) { warn(`${label} fetch failed`, res.status); return null; }
       const text = await res.text();
       const doc = new DOMParser().parseFromString(text, 'text/html');
-      const tag = doc.querySelector('script[data-component-name="RouteList"]');
-      if (!tag) { warn(`${label} fetch had no RouteList store`); return null; }
-      return JSON.parse(tag.textContent);
+      const store = readRouteListStore(doc);
+      if (!store) { warn(`${label} fetch had no RouteList store`); return null; }
+      return store;
     } catch (err) {
       warn(`${label} fetch threw`, err);
       return null;
@@ -959,7 +900,7 @@
     const genre = escapeHtml(route.genre || '');
     const ascents = Number(route.ascents_done_count) || 0;
     const rid = escapeHtml(String(route.id));
-    const routeKey = escapeHtml(`${route.crag_param_id || ''}/${route.param_id || ''}`);
+    const routeKey = escapeHtml(routeKeyOf(route));
     const html = `<tr role="row" data-tt-xf-own="1" data-route-id="${rid}">
       <td><a href="${routeHref}"><div class="hidden">${name}</div><div class="tiny-topo-image"><img src="${escapeHtml(noImageUrl)}" data-bc-img-id="${rid}" alt="" loading="lazy"></div><div class="route-block"><div class="flex-container"><div class="route-block__name_container"><div class="route-block__name">${name}<div class="visible-xs-inline-block">, ${escapeHtml(grade)} <span class="stars star-span">${starsHtml}</span></div></div><div class="visible-xs-block route-block__description"><p class="route-details">${genre} at ${cragName}</p></div></div><div class="route-block__properties"><div class="visible-xs-inline-block route-property"><div class="tags visible-xs-inline-block">${tagsHtml}</div></div></div></div></div></a></td>
       <td class="hidden-xs">${escapeHtml(grade)}</td>
@@ -1309,6 +1250,23 @@
     wrapper.addEventListener('pointercancel', endDrag);
   }
 
+  // We matched a routelist URL but couldn't find thetopo's route data on it.
+  // Say so in the page: a silent bail looks exactly like a disabled
+  // extension, which sends people hunting through chrome://extensions
+  // instead of realising the site changed under us.
+  function showBreakageNotice(detail) {
+    warn(detail);
+    if (document.querySelector('.tt-xf-notice')) return;
+    const el = document.createElement('div');
+    el.className = 'tt-xf-notice';
+    el.setAttribute('role', 'status');
+    el.innerHTML = `<strong>BetterCrags:</strong> ${escapeHtml(detail)} thetopo.com may have changed its page layout — check for a BetterCrags update. <button type="button" class="tt-xf-notice-close" aria-label="Dismiss">×</button>`;
+    el.querySelector('.tt-xf-notice-close').addEventListener('click', () => el.remove());
+    const table = document.querySelector('table.route-list');
+    if (table && table.parentElement) table.parentElement.insertBefore(el, table);
+    else document.body.insertBefore(el, document.body.firstChild);
+  }
+
   async function init() {
     let store = readEmbeddedStore();
     let cragCtx = null;
@@ -1320,7 +1278,7 @@
       cragCtx = detectCragRoutelistContext();
       if (cragCtx) {
         if (!cragCtx.area_param_id) {
-          warn(`crag routelist "${cragCtx.crag_param_id}": no parent area link on page`);
+          showBreakageNotice(`couldn't find this crag's parent area link on the page, so the filters can't load its routes.`);
           return;
         }
         const areaStore = await fetchAreaStore(cragCtx.area_param_id);
@@ -1332,12 +1290,21 @@
           } else {
             warn(`no routes matched crag "${cragCtx.crag_param_id}" in area "${cragCtx.area_param_id}"`);
           }
+        } else {
+          showBreakageNotice(`the area routelist for "${cragCtx.area_param_id}" didn't include its route data, so the filters can't load.`);
+          return;
         }
       }
     }
 
     let routes = store && Array.isArray(store.routes) ? store.routes : [];
-    if (!routes.length) { warn('no routes found in embedded store'); return; }
+    if (!routes.length) {
+      // An embedded store with zero routes is a legitimately empty area; no
+      // store at all on a routelist URL means the page isn't what we expect.
+      if (!store) showBreakageNotice('couldn\'t find the route data this page normally embeds, so the filters are unavailable here.');
+      else warn('no routes found in embedded store');
+      return;
+    }
     const noImageUrl = (store && store.noImageUrl) || PLACEHOLDER_IMG;
 
     const gradeTable = pickGradeTable(routes);
@@ -1380,7 +1347,11 @@
       if (saveTimer) clearTimeout(saveTimer);
       saveTimer = setTimeout(() => {
         saveTimer = null;
-        persistState(captureState(panel));
+        persistState(captureState(panel)).then(ok => {
+          if (ok) return;
+          warnEl.hidden = false;
+          warnEl.textContent = 'Couldn\'t save your filter settings (storage error) — they\'ll reset on reload.';
+        });
       }, 200);
     }
     // Load saved state + persisted meta cache in parallel, then mark hydrated.
@@ -1850,7 +1821,7 @@
         setTimeout(() => { warnEl.hidden = true; }, 4000);
         return;
       }
-      const key = `${route.crag_param_id}/${route.param_id}`;
+      const key = routeKeyOf(route);
       const label = `${route.name}${route.crag_name ? ` (${route.crag_name})` : ''}`;
       openAscentModal({
         user,
@@ -1913,7 +1884,7 @@
         const filtered = routes.filter(r => {
           if (!matchesFilter(r, state)) return false;
           if (state.todo !== 'ignore' || state.done !== 'ignore') {
-            const key = `${r.crag_param_id}/${r.param_id}`;
+            const key = routeKeyOf(r);
             if (state.todo === 'include' && !(todoSet && todoSet.has(key))) return false;
             if (state.todo === 'exclude' && todoSet && todoSet.has(key)) return false;
             if (state.done === 'include' && !(doneSet && doneSet.has(key))) return false;
