@@ -154,6 +154,12 @@
     </footer>
 
     <script src="shared.js"></script>
-    <script src="mycrags.js"></script>
+    <!-- Order matters: each file pulls what it needs from window.BCMyCrags,
+         which the files before it populate. -->
+    <script src="mycrags/core.js"></script>
+    <script src="mycrags/data.js"></script>
+    <script src="mycrags/dashboard.js"></script>
+    <script src="mycrags/tierlists.js"></script>
+    <script src="mycrags/main.js"></script>
   </body>
 </html>

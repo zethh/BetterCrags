@@ -16,7 +16,7 @@ function setNote(text) {
 // defaults to OFF, which already matches the unchecked markup.
 filtersInput.checked = true;
 
-// FILTER_KEY is the same global key content.js persists its panel state
+// FILTER_KEY is the same global key content/caches.js persists its panel state
 // under; new tabs seed from it, so it's the best guess for the active tab.
 // The change handler below reconciles against the tab's live state.
 chrome.storage.local.get([DARK_KEY, FILTER_KEY], (o) => {
